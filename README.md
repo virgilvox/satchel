@@ -18,14 +18,14 @@ chmod +x satchel-*                # make executable (macOS/Linux)
 ### Cargo
 
 ```bash
-cargo install satchel
+cargo install satchel-rag
 ./scripts/download-model.sh
 ```
 
 Or with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) for a pre-built binary:
 
 ```bash
-cargo binstall satchel
+cargo binstall satchel-rag
 ```
 
 ### npm
