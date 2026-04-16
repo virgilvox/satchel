@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  MODEL_URL: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -41,6 +44,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Download embedding model
+        shell: bash
+        run: |
+          mkdir -p vault/models/all-MiniLM-L6-v2
+          curl -sL -o vault/models/all-MiniLM-L6-v2/model.safetensors "$MODEL_URL/model.safetensors"
+          curl -sL -o vault/models/all-MiniLM-L6-v2/tokenizer.json "$MODEL_URL/tokenizer.json"
+          curl -sL -o vault/models/all-MiniLM-L6-v2/config.json "$MODEL_URL/config.json"
+          ls -lh vault/models/all-MiniLM-L6-v2/
+
       - name: Install cross-compilation tools (aarch64 Linux)
         if: matrix.cross
         run: |
@@ -51,7 +63,7 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features embed-model --target ${{ matrix.target }}
 
       - name: Rename binary (unix)
         if: runner.os != 'Windows'
@@ -91,20 +103,21 @@ jobs:
           body: |
             ## Install
 
-            Download the binary for your platform, or install via cargo:
+            Download the binary for your platform. The embedding model is included;
+            no additional setup required.
+
+            ```bash
+            chmod +x satchel-*          # make executable (macOS/Linux)
+            ./satchel-* init personal   # create a vault
+            ./satchel-* ingest ~/notes/ # ingest your documents
+            ./satchel-* serve           # start the MCP server
+            ```
+
+            Or install via cargo (this builds from source without the embedded model;
+            run `./scripts/download-model.sh` after install):
 
             ```bash
             cargo install satchel-rag
-            ```
-
-            After downloading, set up the embedding model:
-
-            ```bash
-            chmod +x satchel-*
-            ./scripts/download-model.sh
-            ./satchel-* init personal
-            ./satchel-* ingest ~/notes/
-            ./satchel-* serve
             ```
 
             See the [README](https://github.com/virgilvox/satchel#readme) for full documentation.

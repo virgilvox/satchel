@@ -5,6 +5,17 @@ use candle_transformers::models::bert::{BertModel, Config};
 use std::path::Path;
 use std::sync::Mutex;
 
+// When built with embed-model, the model files are baked into the binary.
+// This eliminates the need for a separate model download step.
+#[cfg(feature = "embed-model")]
+mod embedded {
+    pub const MODEL: &[u8] =
+        include_bytes!("../../vault/models/all-MiniLM-L6-v2/model.safetensors");
+    pub const TOKENIZER: &[u8] =
+        include_bytes!("../../vault/models/all-MiniLM-L6-v2/tokenizer.json");
+    pub const CONFIG: &[u8] = include_bytes!("../../vault/models/all-MiniLM-L6-v2/config.json");
+}
+
 pub struct Embedder {
     inner: EmbedderInner,
 }
@@ -34,66 +45,105 @@ pub struct EmbeddingResult {
 
 impl Embedder {
     pub fn load(vault_path: &Path) -> Result<Self> {
+        // Try loading from disk first (allows overriding the embedded model)
         let model_dir = vault_path.join("models").join("all-MiniLM-L6-v2");
         let model_path = model_dir.join("model.safetensors");
         let tokenizer_path = model_dir.join("tokenizer.json");
         let config_path = model_dir.join("config.json");
 
-        if !model_path.exists() || !tokenizer_path.exists() || !config_path.exists() {
-            tracing::warn!(
-                "Embedding model not found at {}. Run ./scripts/download-model.sh",
-                model_dir.display()
-            );
-            return Ok(Embedder {
-                inner: EmbedderInner::Unavailable { dims: 384 },
-            });
+        if model_path.exists() && tokenizer_path.exists() && config_path.exists() {
+            match Self::load_from_files(&model_path, &tokenizer_path, &config_path) {
+                Ok(embedder) => {
+                    tracing::info!("Loaded embedding model from disk: all-MiniLM-L6-v2");
+                    return Ok(embedder);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load model from disk: {e}");
+                }
+            }
         }
 
-        match Self::load_candle(&model_path, &tokenizer_path, &config_path) {
-            Ok(inner) => {
-                tracing::info!("Loaded embedding model: all-MiniLM-L6-v2 (candle)");
-                Ok(Embedder { inner })
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load model: {e}");
-                Ok(Embedder {
-                    inner: EmbedderInner::Unavailable { dims: 384 },
-                })
+        // Fall back to embedded model (if compiled with embed-model feature)
+        #[cfg(feature = "embed-model")]
+        {
+            match Self::load_from_bytes(embedded::MODEL, embedded::TOKENIZER, embedded::CONFIG) {
+                Ok(embedder) => {
+                    tracing::info!("Loaded embedded model: all-MiniLM-L6-v2");
+                    return Ok(embedder);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load embedded model: {e}");
+                }
             }
         }
+
+        tracing::warn!(
+            "No embedding model available. Run ./scripts/download-model.sh or build with --features embed-model"
+        );
+        Ok(Embedder {
+            inner: EmbedderInner::Unavailable { dims: 384 },
+        })
     }
 
-    fn load_candle(
+    fn load_from_files(
         model_path: &Path,
         tokenizer_path: &Path,
         config_path: &Path,
-    ) -> Result<EmbedderInner> {
+    ) -> Result<Self> {
         let device = Device::Cpu;
 
         let config_str =
             std::fs::read_to_string(config_path).context("Failed to read config.json")?;
         let config: Config =
             serde_json::from_str(&config_str).context("Failed to parse config.json")?;
-
         let dims = config.hidden_size;
 
         // SAFETY: The safetensors file is read-only and not modified while mapped.
-        // Memory-mapping is safe as long as the file is not truncated externally.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)
                 .context("Failed to load model weights")?
         };
 
         let model = BertModel::load(vb, &config).context("Failed to build BERT model")?;
-
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
 
-        Ok(EmbedderInner::Candle {
-            model: Mutex::new(model),
-            tokenizer,
-            dims,
-            device,
+        Ok(Embedder {
+            inner: EmbedderInner::Candle {
+                model: Mutex::new(model),
+                tokenizer,
+                dims,
+                device,
+            },
+        })
+    }
+
+    #[cfg(feature = "embed-model")]
+    fn load_from_bytes(
+        model_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        config_bytes: &[u8],
+    ) -> Result<Self> {
+        let device = Device::Cpu;
+
+        let config: Config =
+            serde_json::from_slice(config_bytes).context("Failed to parse embedded config")?;
+        let dims = config.hidden_size;
+
+        let vb = VarBuilder::from_buffered_safetensors(model_bytes.to_vec(), DType::F32, &device)
+            .context("Failed to load embedded model weights")?;
+
+        let model = BertModel::load(vb, &config).context("Failed to build BERT model")?;
+        let tokenizer = tokenizers::Tokenizer::from_bytes(tokenizer_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to load embedded tokenizer: {e}"))?;
+
+        Ok(Embedder {
+            inner: EmbedderInner::Candle {
+                model: Mutex::new(model),
+                tokenizer,
+                dims,
+                device,
+            },
         })
     }
 
@@ -125,7 +175,6 @@ impl Embedder {
         }
     }
 
-    /// Create an embedder that returns a fixed unit vector. For testing only.
     #[cfg(feature = "test-support")]
     pub fn fixed(dims: usize) -> Self {
         let mut vector = vec![0.0f32; dims];
@@ -135,7 +184,6 @@ impl Embedder {
         }
     }
 
-    /// Create an embedder in the unavailable state. For testing only.
     #[cfg(feature = "test-support")]
     pub fn unavailable() -> Self {
         Embedder {
@@ -165,14 +213,12 @@ impl Embedder {
 
         let output = model.forward(&input_ids_t, &token_type_ids_t, Some(&attention_mask_t))?;
 
-        // Mean pooling: average token embeddings weighted by attention mask
         let attention_f = attention_mask_t.to_dtype(DType::F32)?.unsqueeze(2)?;
         let weighted = output.broadcast_mul(&attention_f)?;
         let summed = weighted.sum(1)?;
         let mask_sum = attention_f.sum(1)?;
         let pooled = summed.broadcast_div(&mask_sum)?;
 
-        // L2 normalize
         let norm = pooled.sqr()?.sum(1)?.sqrt()?;
         let normalized = pooled.broadcast_div(&norm.unsqueeze(1)?)?;
 

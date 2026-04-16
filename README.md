@@ -8,50 +8,42 @@ SATCHEL is a portable RAG (Retrieval-Augmented Generation) system that runs enti
 
 ### Pre-built binaries (recommended)
 
-Download from the [latest release](https://github.com/virgilvox/satchel/releases/latest) for your platform, then download the embedding model:
+Download from the [latest release](https://github.com/virgilvox/satchel/releases/latest) for your platform. The embedding model is included in the binary. No additional downloads needed.
 
 ```bash
-chmod +x satchel-*                # make executable (macOS/Linux)
-./scripts/download-model.sh       # download the embedding model (~90 MB, one-time)
+chmod +x satchel-*              # make executable (macOS/Linux)
+./satchel-* init personal       # create a vault
+./satchel-* ingest ~/notes/     # ingest your documents
+./satchel-* serve               # start the MCP server
 ```
 
 ### Cargo
+
+Building from source does not include the embedded model. Download it after install:
 
 ```bash
 cargo install satchel-rag
 ./scripts/download-model.sh
 ```
 
-Or with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) for a pre-built binary:
+Or with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) for a pre-built binary (model included):
 
 ```bash
 cargo binstall satchel-rag
 ```
 
-### npm
+### From source with embedded model
 
-```bash
-npx satchel-rag --help
-```
-
-Or install globally:
-
-```bash
-npm install -g satchel-rag
-```
-
-### From source
-
-Requires the [Rust toolchain](https://rustup.rs).
+To bake the model into the binary yourself:
 
 ```bash
 git clone https://github.com/virgilvox/satchel.git
 cd satchel
-cargo build --release
 ./scripts/download-model.sh
+cargo build --release --features embed-model
 ```
 
-The binary is at `target/release/satchel`.
+The binary is at `target/release/satchel` (~100 MB with embedded model).
 
 ## Quick Start
 
