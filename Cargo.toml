@@ -10,10 +10,10 @@ readme = "README.md"
 keywords = ["rag", "mcp", "embeddings", "portable", "knowledge-base"]
 categories = ["command-line-utilities", "database", "text-processing"]
 exclude = [
-    "vault/",
-    "bin/",
-    "npm/",
-    ".github/",
+    "/vault",
+    "/bin",
+    "/npm",
+    "/.github",
 ]
 
 [[bin]]
