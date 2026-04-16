@@ -320,3 +320,212 @@ pub fn print_client_config(client: &str, vault_path: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::Embedder;
+    use crate::rag::Database;
+
+    fn req(method: &str, id: Option<Value>, params: Option<Value>) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: method.to_string(),
+            params,
+        }
+    }
+
+    fn db() -> Database {
+        Database::open_memory().unwrap()
+    }
+
+    #[test]
+    fn test_tool_definitions_valid_json() {
+        let defs = tool_definitions();
+        assert!(defs["tools"].is_array());
+    }
+
+    #[test]
+    fn test_tool_definitions_has_five_tools() {
+        let defs = tool_definitions();
+        assert_eq!(defs["tools"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn test_tool_definitions_names() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"search_knowledge"));
+        assert!(names.contains(&"list_sources"));
+        assert!(names.contains(&"get_document"));
+        assert!(names.contains(&"list_tags"));
+        assert!(names.contains(&"vault_stats"));
+    }
+
+    #[test]
+    fn test_tool_definitions_required_fields() {
+        let defs = tool_definitions();
+        for tool in defs["tools"].as_array().unwrap() {
+            assert!(tool["name"].is_string());
+            assert!(tool["description"].is_string());
+            assert!(tool["inputSchema"].is_object());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_initialize() {
+        let result = handle_request(
+            &req("initialize", Some(json!(1)), Some(json!({}))),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "satchel");
+    }
+
+    #[tokio::test]
+    async fn test_handle_notifications_initialized() {
+        let result = handle_request(
+            &req("notifications/initialized", None, None),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_list() {
+        let result = handle_request(
+            &req("tools/list", Some(json!(1)), None),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result["tools"].as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_handle_unknown_method() {
+        let result = handle_request(
+            &req("bogus/method", Some(json!(1)), None),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_vault_stats() {
+        let result = handle_request(
+            &req(
+                "tools/call",
+                Some(json!(1)),
+                Some(json!({"name": "vault_stats", "arguments": {}})),
+            ),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Documents: 0"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_list_sources_empty() {
+        let result = handle_request(
+            &req(
+                "tools/call",
+                Some(json!(1)),
+                Some(json!({"name": "list_sources", "arguments": {}})),
+            ),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No documents"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_list_tags_empty() {
+        let result = handle_request(
+            &req(
+                "tools/call",
+                Some(json!(1)),
+                Some(json!({"name": "list_tags", "arguments": {}})),
+            ),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No tags"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_get_document_missing() {
+        let result = handle_request(
+            &req(
+                "tools/call",
+                Some(json!(1)),
+                Some(json!({"name": "get_document", "arguments": {"source": "nope"}})),
+            ),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_search_no_embedder() {
+        let result = handle_request(
+            &req(
+                "tools/call",
+                Some(json!(1)),
+                Some(json!({"name": "search_knowledge", "arguments": {"query": "test"}})),
+            ),
+            &db(),
+            &Embedder::unavailable(),
+        )
+        .await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_unknown_tool() {
+        let result = handle_request(
+            &req(
+                "tools/call",
+                Some(json!(1)),
+                Some(json!({"name": "nonexistent_tool", "arguments": {}})),
+            ),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_missing_params() {
+        let result = handle_request(
+            &req("tools/call", Some(json!(1)), None),
+            &db(),
+            &Embedder::fixed(384),
+        )
+        .await;
+        assert_eq!(result["isError"], true);
+    }
+}

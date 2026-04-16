@@ -1,13 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use satchel_rag::{embed, ingest, mcp, rag, server, vault};
 use std::path::PathBuf;
-
-mod embed;
-mod ingest;
-mod mcp;
-mod rag;
-mod server;
-mod vault;
 
 #[derive(Parser)]
 #[command(

@@ -16,18 +16,18 @@ use crate::rag::Database;
 
 const UI_HTML: &str = include_str!("../assets/ui.html");
 
-struct AppState {
-    db: Arc<Database>,
-    embedder: Arc<Embedder>,
+pub struct AppState {
+    pub db: Arc<Database>,
+    pub embedder: Arc<Embedder>,
 }
 
-pub async fn serve(db: Database, embedder: Embedder, port: u16) -> anyhow::Result<()> {
+pub fn build_router(db: Database, embedder: Embedder) -> Router {
     let state = Arc::new(AppState {
         db: Arc::new(db),
         embedder: Arc::new(embedder),
     });
 
-    let app = Router::new()
+    Router::new()
         .route("/", get(ui_handler))
         .route("/mcp", post(mcp_handler))
         .route("/api/status", get(api_status))
@@ -35,14 +35,18 @@ pub async fn serve(db: Database, embedder: Embedder, port: u16) -> anyhow::Resul
         .route("/api/search", post(api_search))
         .route("/api/document", get(api_document))
         .route("/api/tags", get(api_tags))
-        .route("/api/config/{client}", get(api_config))
+        .route("/api/config/:client", get(api_config))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
                 .allow_methods(tower_http::cors::Any)
                 .allow_headers(tower_http::cors::Any),
         )
-        .with_state(state);
+        .with_state(state)
+}
+
+pub async fn serve(db: Database, embedder: Embedder, port: u16) -> anyhow::Result<()> {
+    let app = build_router(db, embedder);
 
     let addr = format!("127.0.0.1:{port}");
     eprintln!("[satchel] Web UI:       http://{addr}");

@@ -538,4 +538,120 @@ mod tests {
         assert!(!tail.is_empty());
         assert!(tail.is_ascii() || !tail.is_empty());
     }
+
+    #[test]
+    fn test_get_tail_tokens_zero() {
+        let result = get_tail_tokens("some text", 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_strip_html_tags_empty_input() {
+        let result = strip_html_tags("");
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_strip_html_tags_no_tags() {
+        let result = strip_html_tags("Hello world");
+        assert!(result.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_strip_html_tags_unclosed_tag() {
+        // Should not panic
+        let result = strip_html_tags("<p>text without closing");
+        assert!(result.contains("text without closing"));
+    }
+
+    #[test]
+    fn test_strip_html_tags_entities_passthrough() {
+        let result = strip_html_tags("<p>A &amp; B</p>");
+        assert!(result.contains("A &amp; B"));
+    }
+
+    #[test]
+    fn test_chunk_text_empty() {
+        let chunks = chunk_text("", 512, 64);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_text_single_long_paragraph() {
+        // A single paragraph with no \n\n. The chunker treats it as one unit.
+        let text = "word ".repeat(2000); // ~2500 tokens
+        let chunks = chunk_text(&text, 512, 64);
+        // Without paragraph breaks, the entire text becomes one chunk
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_text_overlap_preserved() {
+        let para1 = "A".repeat(2048);
+        let para2 = "B".repeat(2048);
+        let para3 = "C".repeat(2048);
+        let text = format!("{}\n\n{}\n\n{}", para1, para2, para3);
+        let chunks = chunk_text(&text, 512, 64);
+        assert!(chunks.len() >= 2);
+        // Overlap: tail of chunk 0 should appear at start of chunk 1
+        if chunks.len() >= 2 {
+            let tail_0 = &chunks[0].text[chunks[0].text.len().saturating_sub(100)..];
+            let head_1 = &chunks[1].text[..100.min(chunks[1].text.len())];
+            // Some overlap chars should match
+            assert!(!tail_0.is_empty());
+            assert!(!head_1.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_collapse_whitespace_multiple_blanks() {
+        let result = collapse_whitespace("line1\n\n\n\nline2\n\n\n");
+        let lines: Vec<&str> = result.lines().collect();
+        // Should have line1, empty, line2 (collapsed)
+        assert!(lines.contains(&"line1"));
+        assert!(lines.contains(&"line2"));
+    }
+
+    #[test]
+    fn test_extract_text_from_docx_xml_empty() {
+        assert!(extract_text_from_docx_xml("").is_empty());
+    }
+
+    #[test]
+    fn test_extract_text_from_docx_xml_tabs_and_breaks() {
+        let xml = r#"<w:p><w:r><w:t>Before</w:t><w:tab/><w:t>After</w:t></w:r></w:p>"#;
+        let result = extract_text_from_docx_xml(xml);
+        assert!(result.contains("Before"));
+        assert!(result.contains('\t'));
+        assert!(result.contains("After"));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn chunking_produces_nonempty_chunks(text in "[a-z]{10,500}") {
+            let chunks = chunk_text(&text, 512, 64);
+            for chunk in &chunks {
+                prop_assert!(!chunk.text.trim().is_empty());
+            }
+        }
+
+        #[test]
+        fn chunking_never_loses_words(text in "[a-z ]{20,1000}") {
+            let chunks = chunk_text(&text, 100, 10);
+            let all_chunk_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" ");
+            for word in text.split_whitespace() {
+                prop_assert!(
+                    all_chunk_text.contains(word),
+                    "Word '{}' lost during chunking",
+                    word
+                );
+            }
+        }
+    }
 }

@@ -20,6 +20,11 @@ enum EmbedderInner {
     Unavailable {
         dims: usize,
     },
+    #[cfg(feature = "test-support")]
+    Fixed {
+        dims: usize,
+        vector: Vec<f32>,
+    },
 }
 
 pub struct EmbeddingResult {
@@ -112,6 +117,29 @@ impl Embedder {
                     "Embedding model not loaded. Download it with ./scripts/download-model.sh"
                 )
             }
+            #[cfg(feature = "test-support")]
+            EmbedderInner::Fixed { vector, .. } => Ok(EmbeddingResult {
+                vector: vector.clone(),
+                token_count: text.split_whitespace().count(),
+            }),
+        }
+    }
+
+    /// Create an embedder that returns a fixed unit vector. For testing only.
+    #[cfg(feature = "test-support")]
+    pub fn fixed(dims: usize) -> Self {
+        let mut vector = vec![0.0f32; dims];
+        vector[0] = 1.0;
+        Embedder {
+            inner: EmbedderInner::Fixed { dims, vector },
+        }
+    }
+
+    /// Create an embedder in the unavailable state. For testing only.
+    #[cfg(feature = "test-support")]
+    pub fn unavailable() -> Self {
+        Embedder {
+            inner: EmbedderInner::Unavailable { dims: 384 },
         }
     }
 
@@ -163,14 +191,76 @@ impl Embedder {
     pub fn dims(&self) -> usize {
         match &self.inner {
             EmbedderInner::Candle { dims, .. } | EmbedderInner::Unavailable { dims } => *dims,
+            #[cfg(feature = "test-support")]
+            EmbedderInner::Fixed { dims, .. } => *dims,
         }
     }
 
     pub fn is_available(&self) -> bool {
-        matches!(&self.inner, EmbedderInner::Candle { .. })
+        match &self.inner {
+            EmbedderInner::Candle { .. } => true,
+            #[cfg(feature = "test-support")]
+            EmbedderInner::Fixed { .. } => true,
+            _ => false,
+        }
     }
 
     pub fn model_name(&self) -> &str {
         "all-MiniLM-L6-v2"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fixed_embedder_returns_vector() {
+        let embedder = Embedder::fixed(384);
+        let result = embedder.embed("hello world").unwrap();
+        assert_eq!(result.len(), 384);
+    }
+
+    #[test]
+    fn test_fixed_embedder_deterministic() {
+        let embedder = Embedder::fixed(384);
+        let a = embedder.embed("test").unwrap();
+        let b = embedder.embed("test").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_fixed_embedder_dims() {
+        let embedder = Embedder::fixed(384);
+        assert_eq!(embedder.dims(), 384);
+    }
+
+    #[test]
+    fn test_fixed_embedder_is_available() {
+        let embedder = Embedder::fixed(384);
+        assert!(embedder.is_available());
+    }
+
+    #[test]
+    fn test_fixed_embedder_model_name() {
+        let embedder = Embedder::fixed(384);
+        assert_eq!(embedder.model_name(), "all-MiniLM-L6-v2");
+    }
+
+    #[test]
+    fn test_unavailable_embedder_fails() {
+        let embedder = Embedder::unavailable();
+        assert!(!embedder.is_available());
+        assert!(embedder.embed("hello").is_err());
+    }
+
+    #[test]
+    fn test_embed_batch_fixed() {
+        let embedder = Embedder::fixed(384);
+        let results = embedder.embed_batch(&["one", "two", "three"]).unwrap();
+        assert_eq!(results.len(), 3);
+        for v in &results {
+            assert_eq!(v.len(), 384);
+        }
     }
 }

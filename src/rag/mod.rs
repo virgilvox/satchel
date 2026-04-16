@@ -71,6 +71,21 @@ const SCHEMA: &str = r#"
 "#;
 
 impl Database {
+    /// Open an in-memory database for testing. No files created.
+    #[cfg(feature = "test-support")]
+    pub fn open_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('embedding_dims', '384')",
+            [],
+        )?;
+        Ok(Database {
+            conn: Mutex::new(conn),
+        })
+    }
+
     pub fn open(vault_path: &Path) -> Result<Self> {
         std::fs::create_dir_all(vault_path)?;
         let db_path = vault_path.join("satchel.db");
@@ -588,5 +603,142 @@ mod tests {
         assert!(results[0].source.contains("/notes/"));
 
         cleanup(&dir);
+    }
+
+    #[test]
+    fn test_search_empty_database() {
+        let db = Database::open_memory().unwrap();
+        let query = vec![1.0, 0.0, 0.0];
+        let results = db.search(&query, 5, None, None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_with_tag_filter() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/b.md", "md", None, "b", "h2")
+            .unwrap();
+
+        let emb = vec![1.0, 0.0];
+        db.insert_chunk("c1", "d1", 0, "chunk a", 5, 0, 5, &emb)
+            .unwrap();
+        db.insert_chunk("c2", "d2", 0, "chunk b", 5, 0, 5, &emb)
+            .unwrap();
+        db.add_tag("d1", "important").unwrap();
+
+        let results = db.search(&emb, 10, None, Some(&["important"])).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].source.contains("a.md"));
+    }
+
+    #[test]
+    fn test_get_full_document_by_id() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("my-id", "/file.md", "md", None, "content here", "h1")
+            .unwrap();
+        let text = db.get_full_document("my-id").unwrap();
+        assert_eq!(text, "content here");
+    }
+
+    #[test]
+    fn test_get_full_document_missing() {
+        let db = Database::open_memory().unwrap();
+        assert!(db.get_full_document("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_add_tag_idempotent() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.add_tag("d1", "test").unwrap();
+        db.add_tag("d1", "test").unwrap(); // should not error
+        let tags = db.list_tags().unwrap();
+        assert_eq!(tags.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_document_cascades_tags() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.add_tag("d1", "tag1").unwrap();
+        db.add_tag("d1", "tag2").unwrap();
+        assert_eq!(db.list_tags().unwrap().len(), 2);
+
+        db.delete_document("/a.md").unwrap();
+        assert_eq!(db.list_tags().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_list_sources_sort_by_date() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/old.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/new.md", "md", None, "b", "h2")
+            .unwrap();
+        let sources = db.list_sources(None, "date").unwrap();
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn test_list_sources_sort_by_chunks() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/few.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/many.md", "md", None, "b", "h2")
+            .unwrap();
+        db.insert_chunk("c1", "d2", 0, "x", 5, 0, 1, &[0.1])
+            .unwrap();
+        db.insert_chunk("c2", "d2", 1, "y", 5, 1, 2, &[0.2])
+            .unwrap();
+
+        let sources = db.list_sources(None, "chunks").unwrap();
+        assert_eq!(sources[0].path, "/many.md");
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn cosine_self_similarity_is_one(v in proptest::collection::vec(-1.0f32..1.0, 1..100usize)) {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-10 {
+                let sim = cosine_similarity(&v, &v);
+                prop_assert!((sim - 1.0).abs() < 1e-4, "Got {sim} for self-similarity");
+            }
+        }
+
+        #[test]
+        fn cosine_similarity_is_symmetric(
+            a in proptest::collection::vec(-1.0f32..1.0, 1..50usize),
+        ) {
+            let b: Vec<f32> = a.iter().rev().cloned().collect();
+            let ab = cosine_similarity(&a, &b);
+            let ba = cosine_similarity(&b, &a);
+            prop_assert!((ab - ba).abs() < 1e-6);
+        }
+
+        #[test]
+        fn cosine_similarity_in_range(
+            a in proptest::collection::vec(-1.0f32..1.0, 1..50usize),
+        ) {
+            let b: Vec<f32> = a.iter().map(|x| x + 0.1).collect();
+            let sim = cosine_similarity(&a, &b);
+            prop_assert!(sim >= -1.0 - 1e-5 && sim <= 1.0 + 1e-5, "Got {sim}");
+        }
+
+        #[test]
+        fn embedding_blob_roundtrip(v in proptest::collection::vec(-1e6f32..1e6, 0..500usize)) {
+            let blob = embedding_to_blob(&v);
+            let restored = blob_to_embedding(&blob);
+            prop_assert_eq!(v, restored);
+        }
     }
 }
