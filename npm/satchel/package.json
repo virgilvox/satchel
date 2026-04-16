@@ -1,0 +1,32 @@
+{
+  "name": "satchel-rag",
+  "version": "0.1.0",
+  "description": "Portable RAG system. Single binary, local embeddings, MCP protocol.",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/virgilvox/satchel"
+  },
+  "homepage": "https://github.com/virgilvox/satchel",
+  "keywords": [
+    "rag",
+    "mcp",
+    "embeddings",
+    "knowledge-base",
+    "portable",
+    "semantic-search"
+  ],
+  "bin": {
+    "satchel": "bin.js"
+  },
+  "files": [
+    "bin.js"
+  ],
+  "optionalDependencies": {
+    "@satchel-rag/darwin-arm64": "0.1.0",
+    "@satchel-rag/darwin-x64": "0.1.0",
+    "@satchel-rag/linux-arm64": "0.1.0",
+    "@satchel-rag/linux-x64": "0.1.0",
+    "@satchel-rag/win32-x64": "0.1.0"
+  }
+}

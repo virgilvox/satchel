@@ -1,0 +1,13 @@
+/target
+/bin/
+/vault/vaults/*/satchel.db
+/vault/vaults/*/satchel.db-wal
+/vault/vaults/*/satchel.db-shm
+/vault/models/
+/vault/satchel.toml
+.DS_Store
+*.swp
+*.swo
+/npm/darwin-*/
+/npm/linux-*/
+/npm/win32-*/
