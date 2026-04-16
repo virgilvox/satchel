@@ -2250,7 +2250,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "satchel"
+name = "satchel-rag"
 version = "0.1.0"
 dependencies = [
  "anyhow",
