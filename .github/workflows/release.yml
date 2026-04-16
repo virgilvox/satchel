@@ -12,6 +12,7 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -20,6 +21,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: satchel-linux-aarch64
+            cross: true
           - target: x86_64-apple-darwin
             os: macos-13
             artifact: satchel-macos-x86_64
@@ -36,12 +38,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install cross-compilation tools (aarch64 Linux)
+        if: matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -73,7 +80,7 @@ jobs:
         run: |
           mkdir release
           find artifacts -type f -exec cp {} release/ \;
-          chmod +x release/satchel-*
+          chmod +x release/satchel-* 2>/dev/null || true
           ls -lh release/
 
       - name: Create GitHub Release
@@ -84,16 +91,20 @@ jobs:
           body: |
             ## Install
 
-            Download the binary for your platform from the assets below.
-
-            **Quick start after download:**
+            Download the binary for your platform, or install via cargo:
 
             ```bash
-            chmod +x satchel-*            # make executable (macOS/Linux)
-            ./satchel-* init personal     # create a vault
-            ./scripts/download-model.sh   # download the embedding model
-            ./satchel-* ingest ~/notes/   # ingest your documents
-            ./satchel-* serve             # start the MCP server
+            cargo install satchel-rag
+            ```
+
+            After downloading, set up the embedding model:
+
+            ```bash
+            chmod +x satchel-*
+            ./scripts/download-model.sh
+            ./satchel-* init personal
+            ./satchel-* ingest ~/notes/
+            ./satchel-* serve
             ```
 
             See the [README](https://github.com/virgilvox/satchel#readme) for full documentation.
