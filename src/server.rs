@@ -113,10 +113,10 @@ async fn api_sources(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SourcesQuery>,
 ) -> Json<Value> {
-    match state
-        .db
-        .list_sources(q.filter_type.as_deref(), q.sort_by.as_deref().unwrap_or("name"))
-    {
+    match state.db.list_sources(
+        q.filter_type.as_deref(),
+        q.sort_by.as_deref().unwrap_or("name"),
+    ) {
         Ok(sources) => Json(json!({ "sources": sources })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
@@ -176,9 +176,7 @@ async fn api_tags(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 }
 
-async fn api_config(
-    axum::extract::Path(client): axum::extract::Path<String>,
-) -> Json<Value> {
+async fn api_config(axum::extract::Path(client): axum::extract::Path<String>) -> Json<Value> {
     let config = match client.as_str() {
         "claude-desktop" => json!({
             "client": "Claude Desktop",

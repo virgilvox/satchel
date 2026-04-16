@@ -1,9 +1,9 @@
 use anyhow::Result;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::rag::Database;
-use crate::embed::Embedder;
 use super::{JsonRpcRequest, JsonRpcResponse};
+use crate::embed::Embedder;
+use crate::rag::Database;
 
 pub async fn serve(db: Database, embedder: Embedder) -> Result<()> {
     let stdin = io::stdin();

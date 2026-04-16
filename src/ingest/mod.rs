@@ -139,7 +139,14 @@ fn ingest_file(
         .and_then(|s| s.to_str())
         .unwrap_or("untitled");
 
-    db.insert_document(&doc_id, &source_path, &extension, Some(title), &text, &sha256)?;
+    db.insert_document(
+        &doc_id,
+        &source_path,
+        &extension,
+        Some(title),
+        &text,
+        &sha256,
+    )?;
 
     let chunks = chunk_text(&text, config.chunk_size, config.chunk_overlap);
 
@@ -473,10 +480,7 @@ mod tests {
 
     #[test]
     fn test_strip_html_tags_basic() {
-        assert_eq!(
-            strip_html_tags("<p>Hello</p>").trim(),
-            "Hello"
-        );
+        assert_eq!(strip_html_tags("<p>Hello</p>").trim(), "Hello");
     }
 
     #[test]
@@ -530,7 +534,7 @@ mod tests {
         // Each emoji is 4 bytes in UTF-8. Ensure we don't split mid-character.
         let text = "prefix_text_here_\u{1F600}\u{1F600}\u{1F600}";
         let tail = get_tail_tokens(text, 2); // 2 tokens = 8 chars target
-        // Should not panic, and result should be valid UTF-8
+                                             // Should not panic, and result should be valid UTF-8
         assert!(!tail.is_empty());
         assert!(tail.is_ascii() || !tail.is_empty());
     }

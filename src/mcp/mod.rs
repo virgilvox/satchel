@@ -1,12 +1,12 @@
 pub mod stdio;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
-use anyhow::Result;
 
-use crate::rag::Database;
 use crate::embed::Embedder;
+use crate::rag::Database;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
@@ -115,11 +115,7 @@ pub fn tool_definitions() -> Value {
     })
 }
 
-pub async fn handle_request(
-    request: &JsonRpcRequest,
-    db: &Database,
-    embedder: &Embedder,
-) -> Value {
+pub async fn handle_request(request: &JsonRpcRequest, db: &Database, embedder: &Embedder) -> Value {
     match request.method.as_str() {
         "initialize" => json!({
             "protocolVersion": "2024-11-05",

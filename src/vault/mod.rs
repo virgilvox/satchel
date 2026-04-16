@@ -13,9 +13,7 @@ fn validate_vault_name(name: &str) -> Result<()> {
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
-        anyhow::bail!(
-            "Vault name can only contain letters, numbers, hyphens, and underscores"
-        );
+        anyhow::bail!("Vault name can only contain letters, numbers, hyphens, and underscores");
     }
     if name.starts_with('-') || name.starts_with('_') {
         anyhow::bail!("Vault name must start with a letter or number");

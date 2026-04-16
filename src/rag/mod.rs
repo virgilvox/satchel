@@ -182,8 +182,11 @@ impl Database {
             results.retain(|r| tags.iter().any(|t| r.tags.iter().any(|rt| rt == t)));
         }
 
-        results
-            .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
 
         Ok(results)
@@ -261,10 +264,8 @@ impl Database {
 
     pub fn stats(&self) -> Result<VaultStats> {
         let conn = self.conn.lock().unwrap();
-        let doc_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
-        let chunk_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        let doc_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+        let chunk_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         let dims: String = conn
             .query_row(
                 "SELECT value FROM metadata WHERE key = 'embedding_dims'",
@@ -272,10 +273,8 @@ impl Database {
                 |r| r.get(0),
             )
             .unwrap_or_else(|_| "384".to_string());
-        let page_count: i64 =
-            conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        let page_size: i64 =
-            conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let size_bytes = page_count * page_size;
 
         Ok(VaultStats {
@@ -307,10 +306,7 @@ impl Database {
             "DELETE FROM chunks WHERE document_id = ?1",
             params![&doc_id],
         )?;
-        conn.execute(
-            "DELETE FROM tags WHERE document_id = ?1",
-            params![&doc_id],
-        )?;
+        conn.execute("DELETE FROM tags WHERE document_id = ?1", params![&doc_id])?;
         conn.execute("DELETE FROM documents WHERE id = ?1", params![&doc_id])?;
         Ok(())
     }
@@ -469,8 +465,15 @@ mod tests {
     fn test_database_insert_and_retrieve() {
         let (db, dir) = temp_db();
 
-        db.insert_document("doc1", "/test/file.md", "md", Some("Test"), "hello world", "abc123")
-            .unwrap();
+        db.insert_document(
+            "doc1",
+            "/test/file.md",
+            "md",
+            Some("Test"),
+            "hello world",
+            "abc123",
+        )
+        .unwrap();
 
         let text = db.get_full_document("/test/file.md").unwrap();
         assert_eq!(text, "hello world");
@@ -580,9 +583,7 @@ mod tests {
         db.insert_chunk("c2", "d2", 0, "work chunk", 5, 0, 5, &emb)
             .unwrap();
 
-        let results = db
-            .search(&emb, 10, Some("/notes/"), None)
-            .unwrap();
+        let results = db.search(&emb, 10, Some("/notes/"), None).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].source.contains("/notes/"));
 

@@ -1,5 +1,5 @@
-use anyhow::{Result, Context};
-use candle_core::{Device, Tensor, DType};
+use anyhow::{Context, Result};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
 use std::path::Path;
@@ -65,10 +65,10 @@ impl Embedder {
     ) -> Result<EmbedderInner> {
         let device = Device::Cpu;
 
-        let config_str = std::fs::read_to_string(config_path)
-            .context("Failed to read config.json")?;
-        let config: Config = serde_json::from_str(&config_str)
-            .context("Failed to parse config.json")?;
+        let config_str =
+            std::fs::read_to_string(config_path).context("Failed to read config.json")?;
+        let config: Config =
+            serde_json::from_str(&config_str).context("Failed to parse config.json")?;
 
         let dims = config.hidden_size;
 
@@ -79,8 +79,7 @@ impl Embedder {
                 .context("Failed to load model weights")?
         };
 
-        let model = BertModel::load(vb, &config)
-            .context("Failed to build BERT model")?;
+        let model = BertModel::load(vb, &config).context("Failed to build BERT model")?;
 
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
