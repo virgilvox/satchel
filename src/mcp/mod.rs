@@ -266,9 +266,10 @@ fn handle_vault_stats(db: &Database) -> Value {
     }
 }
 
-pub fn print_client_config(client: &str, vault_path: &Path) -> Result<()> {
-    let vault_abs = std::fs::canonicalize(vault_path).unwrap_or_else(|_| vault_path.to_path_buf());
-    let vault_str = vault_abs.display();
+pub fn print_client_config(client: &str, _vault_path: &Path) -> Result<()> {
+    let bin = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "/path/to/satchel".to_string());
 
     match client {
         "claude-desktop" => {
@@ -277,17 +278,15 @@ pub fn print_client_config(client: &str, vault_path: &Path) -> Result<()> {
                 serde_json::to_string_pretty(&json!({
                     "mcpServers": {
                         "satchel": {
-                            "command": format!("{}/satchel", vault_str),
-                            "args": ["serve", "--transport", "stdio", "--vault", &vault_str.to_string()]
+                            "command": &bin,
+                            "args": ["serve"]
                         }
                     }
                 }))?
             );
         }
         "claude-code" => {
-            println!(
-                "claude mcp add satchel -- {vault_str}/satchel serve --transport stdio --vault {vault_str}"
-            );
+            println!("claude mcp add satchel -- {bin} serve");
         }
         "cursor" => {
             println!(
@@ -295,26 +294,26 @@ pub fn print_client_config(client: &str, vault_path: &Path) -> Result<()> {
                 serde_json::to_string_pretty(&json!({
                     "mcpServers": {
                         "satchel": {
-                            "command": format!("{}/satchel", vault_str),
-                            "args": ["serve", "--transport", "stdio", "--vault", &vault_str.to_string()]
+                            "command": &bin,
+                            "args": ["serve"]
                         }
                     }
                 }))?
             );
         }
         "browser" => {
-            println!("Start SATCHEL with HTTP transport:");
-            println!("  satchel serve --transport http --vault {vault_str}");
+            println!("Run satchel with no arguments to start the web UI:");
+            println!("  {bin}");
             println!();
-            println!("Then connect browser AI clients:");
+            println!("Endpoints:");
+            println!("  Web UI:       http://localhost:7428");
             println!("  MCP endpoint: http://localhost:7428/mcp");
             println!("  REST API:     http://localhost:7428/api/search");
-            println!("  Web UI:       http://localhost:7428");
         }
         _ => {
             println!("# SATCHEL MCP Server");
-            println!("# Stdio:  satchel serve --transport stdio --vault {vault_str}");
-            println!("# HTTP:   satchel serve --transport http --port 7428 --vault {vault_str}");
+            println!("# Web UI + HTTP: {bin}");
+            println!("# Stdio (for MCP clients): {bin} serve");
         }
     }
 

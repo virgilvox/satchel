@@ -16,7 +16,7 @@
 - Minimal dependencies; every crate must justify its inclusion
 - Error handling via anyhow at boundaries
 - No unwrap() in production paths; only in tests or truly unreachable cases
-- Modules: mcp/, rag/, embed/, ingest/, vault/
+- Modules: embed/, ingest/, mcp/, rag/, vault/, server.rs, lib.rs
 
 ## Testing
 - `cargo test` must pass before any commit

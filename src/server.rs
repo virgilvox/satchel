@@ -187,40 +187,40 @@ async fn api_config(axum::extract::Path(client): axum::extract::Path<String>) ->
             "config": {
                 "mcpServers": {
                     "satchel": {
-                        "command": "./start.sh",
-                        "args": ["serve", "--transport", "stdio"]
+                        "command": "/path/to/satchel",
+                        "args": ["serve"]
                     }
                 }
             },
-            "instructions": "Add this to your Claude Desktop MCP configuration file."
+            "instructions": "Add this to your Claude Desktop config. Replace /path/to/satchel with the actual path to the binary."
         }),
         "claude-code" => json!({
             "client": "Claude Code",
-            "command": "claude mcp add satchel -- ./start.sh serve --transport stdio",
-            "instructions": "Run this command in your terminal."
+            "command": "claude mcp add satchel -- /path/to/satchel serve",
+            "instructions": "Run this command in your terminal. Replace /path/to/satchel with the actual path."
         }),
         "cursor" => json!({
             "client": "Cursor",
             "config": {
                 "mcpServers": {
                     "satchel": {
-                        "command": "./start.sh",
-                        "args": ["serve", "--transport", "stdio"]
+                        "command": "/path/to/satchel",
+                        "args": ["serve"]
                     }
                 }
             },
-            "instructions": "Add this to your Cursor MCP configuration."
+            "instructions": "Add this to your Cursor MCP config. Replace /path/to/satchel with the actual path."
         }),
         "browser" => json!({
             "client": "Browser AI (Claude.ai, ChatGPT)",
             "endpoint": "http://localhost:7428/mcp",
             "rest_api": "http://localhost:7428/api/search",
-            "instructions": "Use a browser extension like claude-mcp to bridge your local SATCHEL server to browser-based AI clients. Or use the REST API directly."
+            "instructions": "SATCHEL is already running. Use the claude-mcp browser extension to bridge to claude.ai, or use the REST API directly."
         }),
         _ => json!({
             "client": "Generic",
-            "stdio": "./start.sh serve --transport stdio",
-            "http": "./start.sh serve --transport http --port 7428"
+            "stdio": "/path/to/satchel serve",
+            "http": "/path/to/satchel  (runs HTTP server by default)"
         }),
     };
 

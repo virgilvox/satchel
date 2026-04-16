@@ -103,21 +103,13 @@ jobs:
           body: |
             ## Install
 
-            Download the binary for your platform. The embedding model is included;
-            no additional setup required.
+            Download the binary for your platform. The embedding model is included. Nothing else to install.
 
             ```bash
-            chmod +x satchel-*          # make executable (macOS/Linux)
-            ./satchel-* init personal   # create a vault
-            ./satchel-* ingest ~/notes/ # ingest your documents
-            ./satchel-* serve           # start the MCP server
+            chmod +x satchel-*              # make executable (macOS/Linux)
+            ./satchel-*                     # launch web UI at http://localhost:7428
+            ./satchel-* ingest ~/notes/     # ingest your documents
+            ./satchel-* config              # get config snippet for your AI client
             ```
 
-            Or install via cargo (this builds from source without the embedded model;
-            run `./scripts/download-model.sh` after install):
-
-            ```bash
-            cargo install satchel-rag
-            ```
-
-            See the [README](https://github.com/virgilvox/satchel#readme) for full documentation.
+            A default vault is created automatically on first run. See the [README](https://github.com/virgilvox/satchel#readme) for full documentation.

@@ -245,27 +245,27 @@ async function loadDocuments() {
 const configs = {
   'claude-desktop': {
     title: 'Claude Desktop',
-    instructions: 'Add this to your Claude Desktop MCP configuration (Settings > Developer > MCP Servers):',
-    code: JSON.stringify({"mcpServers":{"satchel":{"command":"./start.sh","args":["serve","--transport","stdio"]}}}, null, 2),
-    note: 'Replace ./start.sh with the full path to start.sh on your SATCHEL drive.'
+    instructions: 'Add this to your Claude Desktop config (Settings > Developer > Edit Config):',
+    code: JSON.stringify({"mcpServers":{"satchel":{"command":"/path/to/satchel","args":["serve"]}}}, null, 2),
+    note: 'Replace /path/to/satchel with the actual path to the binary. Run "satchel config" in your terminal to get the snippet with the correct path filled in.'
   },
   'claude-code': {
     title: 'Claude Code',
     instructions: 'Run this command in your terminal:',
-    code: 'claude mcp add satchel -- /path/to/start.sh serve --transport stdio',
-    note: 'Replace /path/to/start.sh with the actual path on your drive.'
+    code: 'claude mcp add satchel -- /path/to/satchel serve',
+    note: 'Replace /path/to/satchel with the actual path to the binary.'
   },
   'cursor': {
     title: 'Cursor',
     instructions: 'Add this to your Cursor MCP configuration:',
-    code: JSON.stringify({"mcpServers":{"satchel":{"command":"./start.sh","args":["serve","--transport","stdio"]}}}, null, 2),
-    note: 'Replace ./start.sh with the full path on your SATCHEL drive.'
+    code: JSON.stringify({"mcpServers":{"satchel":{"command":"/path/to/satchel","args":["serve"]}}}, null, 2),
+    note: 'Replace /path/to/satchel with the actual path to the binary.'
   },
   'browser': {
     title: 'Browser AI Clients',
-    instructions: 'SATCHEL runs a local HTTP server that browser-based AI tools can connect to:',
+    instructions: 'SATCHEL is already running. These are your local endpoints:',
     code: 'MCP Endpoint:  ' + window.location.origin + '/mcp\nREST API:      ' + window.location.origin + '/api/search\nWeb UI:        ' + window.location.origin + '/',
-    note: 'Use the claude-mcp browser extension to bridge Claude.ai to your local SATCHEL instance. For ChatGPT, point a Custom GPT action at ' + window.location.origin + '/api/search.'
+    note: 'Use the claude-mcp browser extension to bridge Claude.ai to this SATCHEL instance. For ChatGPT, point a Custom GPT action at ' + window.location.origin + '/api/search.'
   }
 };
 
