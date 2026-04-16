@@ -1,28 +1,34 @@
 # SATCHEL
 
-**Portable RAG on a stick.**
+**Self-contained Augmented Text Corpus for Host-free Embedded Lookup**
 
-Download one file. Feed it your documents. Point your AI at it. Your entire knowledge base is now available as context in Claude, ChatGPT, Cursor, or any MCP-compatible client. No cloud. No API keys. No installation. Everything runs locally.
+Portable RAG on a stick. Download one file, run it, and your entire knowledge base is available as context in Claude, ChatGPT, Cursor, or any MCP-compatible client. No cloud. No API keys. No installation. Everything runs locally.
 
 ## Get Started
 
 **1. Download** the binary for your platform from the [latest release](https://github.com/virgilvox/satchel/releases/latest). The embedding model is included. Nothing else to install.
 
-**2. Ingest** your documents:
+**2. Run it:**
 
 ```bash
-chmod +x satchel-*
-./satchel-* init personal
-./satchel-* ingest ~/Documents/notes/
+./satchel
 ```
 
-**3. Connect** your AI client (see below).
+This starts the web UI at [http://localhost:7428](http://localhost:7428). A default vault is created automatically on first run.
+
+**3. Ingest your documents:**
+
+```bash
+./satchel ingest ~/Documents/notes/
+```
+
+**4. Connect your AI client** (see below).
 
 That's it.
 
 ## Connect to Claude Desktop
 
-Add this to your Claude Desktop config (Settings > Developer > Edit Config):
+Run `./satchel config` to get the config snippet, then paste it into Claude Desktop (Settings > Developer > Edit Config):
 
 ```json
 {
@@ -58,15 +64,9 @@ Add to your Cursor MCP config:
 }
 ```
 
-## Connect via Browser (Claude.ai, ChatGPT)
+## Web UI
 
-Start the HTTP server:
-
-```bash
-satchel serve --transport http
-```
-
-Open `http://localhost:7428` for the web UI. The MCP endpoint is at `http://localhost:7428/mcp`. Browser extensions like [claude-mcp](https://github.com/nicepkg/claude-mcp) can bridge this to claude.ai.
+Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428). From there you can search your knowledge base, view ingested documents, and get connection instructions for any AI client.
 
 ## Supported File Types
 
@@ -85,7 +85,7 @@ satchel vault use work
 
 ## Alternative Install Methods
 
-### Cargo (builds from source, does not include the model)
+### Cargo (builds from source, model not included)
 
 ```bash
 cargo install satchel-rag
@@ -121,7 +121,7 @@ When connected, your AI client can use these tools:
 
 ## REST API
 
-Available when running with `--transport http`:
+Available when running with `--transport http` or with no arguments:
 
 ```
 GET  /api/status              Server status and vault stats
@@ -140,4 +140,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[AGPL-3.0-only](LICENSE). For commercial licensing, contact Moheeb Zara at hackbuildvideo@gmail.com.
+[AGPL-3.0-only](LICENSE). For commercial licensing, visit [hack.build](https://hack.build).

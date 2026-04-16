@@ -15,7 +15,7 @@ struct Cli {
     vault: PathBuf,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -82,6 +82,16 @@ enum VaultAction {
     Use { name: String },
 }
 
+/// Ensure a default vault exists. Creates one if the vault directory has no vaults.
+fn ensure_default_vault(vault_path: &PathBuf) -> Result<()> {
+    if vault::active_vault_path(vault_path).is_ok() {
+        return Ok(());
+    }
+    eprintln!("[satchel] No vault found. Creating default vault...");
+    vault::create_vault(vault_path, "default")?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -95,8 +105,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let vault_path = cli.vault.clone();
 
-    match cli.command {
+    let command = cli.command.unwrap_or(Commands::Serve {
+        transport: "http".to_string(),
+        port: 7428,
+    });
+
+    match command {
         Commands::Serve { transport, port } => {
+            ensure_default_vault(&vault_path)?;
             let vault_dir = vault::active_vault_path(&vault_path)?;
             let db = rag::Database::open(&vault_dir)?;
             let embedder = embed::Embedder::load(&vault_path)?;
@@ -114,6 +130,7 @@ async fn main() -> Result<()> {
             chunk_size,
             chunk_overlap,
         } => {
+            ensure_default_vault(&vault_path)?;
             let vault_dir = vault::active_vault_path(&vault_path)?;
             let db = rag::Database::open(&vault_dir)?;
             let embedder = embed::Embedder::load(&vault_path)?;
@@ -136,6 +153,7 @@ async fn main() -> Result<()> {
         },
 
         Commands::Stats => {
+            ensure_default_vault(&vault_path)?;
             let vault_dir = vault::active_vault_path(&vault_path)?;
             let db = rag::Database::open(&vault_dir)?;
             rag::print_stats(&db)?;
