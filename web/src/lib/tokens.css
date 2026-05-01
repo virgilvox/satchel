@@ -1,0 +1,221 @@
+/* ============================================================
+   SATCHEL · Design tokens · single source of truth.
+   Mode toggle flips data-mode on <html>. All component CSS
+   reads from these custom properties.
+============================================================ */
+
+:root,
+:root[data-mode="dark"] {
+  --bg:           #0d1117;
+  --bg-deep:      #080b10;
+  --surface:      #11161f;
+  --surface-2:    #181f2d;
+  --border:       #1f2937;
+  --border-strong:#2d3a4f;
+  --text:         #d8dde6;
+  --text-bright:  #e8edf5;
+  --text-dim:     #6b7280;
+  --amber:        #f5b941;
+  --amber-deep:   #e8a83c;
+  --amber-soft:   rgba(245, 185, 65, 0.12);
+  --amber-line:   rgba(245, 185, 65, 0.35);
+  --teal:         #5eead4;
+  --teal-deep:    #4dd4a8;
+  --teal-soft:    rgba(94, 234, 212, 0.10);
+  --danger:       #f87171;
+  --danger-soft:  rgba(248, 113, 113, 0.10);
+  --noise-opacity:0.04;
+  --mark-stroke:  #f5b941;
+  --mark-mid-line:#d8dde6;
+  --mark-bg-cut:  #0d1117;
+  --tagline:      #d8dde6;
+  --kbd-bg:       rgba(0, 0, 0, 0.25);
+  --kbd-bd:       rgba(255, 255, 255, 0.08);
+  --shadow-frame: 0 8px 32px rgba(0, 0, 0, 0.30);
+}
+
+:root[data-mode="light"] {
+  --bg:           #f0ece1;
+  --bg-deep:      #e3dcc8;
+  --surface:      #f7f1e1;
+  --surface-2:    #ebe2ca;
+  --border:       #c4baa3;
+  --border-strong:#9c9079;
+  --text:         #1a1410;
+  --text-bright:  #0d0906;
+  --text-dim:     #7d6f5a;
+  --amber:        #b86b0a;
+  --amber-deep:   #9b5808;
+  --amber-soft:   rgba(184, 107, 10, 0.10);
+  --amber-line:   rgba(184, 107, 10, 0.40);
+  --teal:         #1f6651;
+  --teal-deep:    #154a3b;
+  --teal-soft:    rgba(31, 102, 81, 0.10);
+  --danger:       #b03030;
+  --danger-soft:  rgba(176, 48, 48, 0.10);
+  --noise-opacity:0.06;
+  --mark-stroke:  #1a1410;
+  --mark-mid-line:#1a1410;
+  --mark-bg-cut:  #f0ece1;
+  --tagline:      #1a1410;
+  --kbd-bg:       rgba(255, 255, 255, 0.4);
+  --kbd-bd:       rgba(0, 0, 0, 0.10);
+  --shadow-frame: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+/* ============================================================
+   Base
+============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  transition: background-color 220ms ease, color 220ms ease;
+  min-height: 100vh;
+}
+
+/* Brand-defining film grain. Lives at the body root so every view inherits. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: var(--noise-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+}
+
+::selection { background: var(--amber); color: var(--bg-deep); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ============================================================
+   Shared primitives — buttons, inputs, pills, dots, kbd
+============================================================ */
+
+.btn {
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  padding: 12px 22px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+.btn-primary   { background: var(--amber); color: var(--bg-deep); border-color: var(--amber); }
+.btn-primary:hover   { background: var(--amber-deep); border-color: var(--amber-deep); }
+.btn-secondary { background: transparent; color: var(--text); border-color: var(--border-strong); }
+.btn-secondary:hover { border-color: var(--text-dim); color: var(--text-bright); }
+.btn-ghost     { padding: 8px 12px; color: var(--text-dim); border: none; }
+.btn-ghost:hover { color: var(--text-bright); }
+.btn-danger    { background: transparent; color: var(--danger); border-color: var(--danger); }
+.btn-danger:hover { background: var(--danger); color: var(--bg-deep); }
+.btn-sm        { padding: 9px 16px; font-size: 10px; letter-spacing: 2px; }
+.btn:disabled  { opacity: 0.4; cursor: not-allowed; }
+
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+kbd {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  background: var(--kbd-bg);
+  border: 1px solid var(--kbd-bd);
+  color: inherit;
+  opacity: 0.7;
+}
+
+.input,
+.select,
+textarea.input {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 12px 14px;
+  background: var(--bg-deep);
+  color: var(--text);
+  border: 1px solid var(--border);
+  outline: none;
+  width: 100%;
+  transition: 120ms ease;
+  letter-spacing: 0.3px;
+}
+.input::placeholder, textarea.input::placeholder { color: var(--text-dim); }
+.input:focus, .select:focus, textarea.input:focus {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber-line);
+}
+.select {
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4 L6 8 L10 4' stroke='%236b7280' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  padding-right: 36px;
+}
+
+.field-group { display: flex; flex-direction: column; gap: 8px; }
+.field-label {
+  font-size: 9px;
+  letter-spacing: 2.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field-label::before { content: '■'; color: var(--amber); font-size: 9px; }
+
+.section-label {
+  font-size: 10px;
+  letter-spacing: 2.5px;
+  color: var(--text-dim);
+  margin: 32px 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.section-label::before { content: '■'; color: var(--amber); font-size: 10px; }
+.section-label::after { content: ''; flex: 1; border-bottom: 1px solid var(--border); }
+.section-label .count { color: var(--teal); }
+
+.empty,
+.loading {
+  text-align: center;
+  padding: 36px 18px;
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+}
+.empty .glyph,
+.loading .glyph {
+  display: block;
+  font-size: 24px;
+  color: var(--border-strong);
+  margin-bottom: 12px;
+}
+
+a, .link {
+  color: var(--teal);
+  text-decoration: none;
+  border-bottom: 1px solid var(--teal-soft);
+}
+a:hover, .link:hover { border-bottom-color: var(--teal); }

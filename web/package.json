@@ -1,0 +1,27 @@
+{
+  "name": "satchel-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "build:fast": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.83",
+    "marked": "^18.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tsconfig/svelte": "^5.0.8",
+    "svelte": "^5.55.0",
+    "svelte-check": "^4.4.7",
+    "tslib": "^2.8.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.0",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

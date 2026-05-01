@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Web UI · Svelte 5 + Vite framework
+
+- The single `assets/ui.html` is replaced by a proper front-end project at
+  `web/`: Svelte 5 (runes) + TypeScript + Vite. `vite-plugin-singlefile`
+  emits one self-contained HTML at `web/dist/index.html` with all CSS + JS
+  inlined, so the Rust binary still embeds a single file via `include_str!`
+  and ships as one statically-linked binary.
+- Strong separation of concerns: design tokens live in `web/src/lib/tokens.css`,
+  API/MCP/WebLLM clients in `web/src/lib/`, reusable primitives in
+  `web/src/components/` (Mark, Pill, Dot, Modal, MessageBubble, ToolCallCard,
+  ReasoningBlock, Composer, …), per-tab views in `web/src/routes/`.
+- New **Chat** tab: full in-browser LLM with tool calling against the local
+  MCP server. The chat client picks a small WebLLM model (Llama 3.2 1B/3B,
+  Hermes 3 3B, Qwen 2.5 3B, Phi 3.5 mini, DeepSeek R1 distill 7B), loads it
+  via WebGPU into the browser's IndexedDB cache, and chats over the vault
+  using the MCP tools advertised by the satchel server. Reasoning blocks
+  emitted as `<think>...</think>` are rendered in a collapsible panel; tool
+  calls render inline as teal-bordered cards with the request, the result,
+  and a status footer.
+- Brand assets at `assets/brand/`: dark + light SVG and PNG variants of the
+  horizontal lockup (mark + SATCHEL wordmark + tagline) and the standalone
+  punk/displaced mark. README's hero now uses a `<picture>` element that
+  picks the right variant from `prefers-color-scheme`.
+
 ### Web UI redesign
 
 - New design system applied across the web UI: dark + light themes via CSS

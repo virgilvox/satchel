@@ -46,14 +46,42 @@ src/
   ingest/         Document parsing and chunking
   mcp/            MCP protocol and stdio transport
   rag/            SQLite database and vector search
-  server.rs       HTTP server, REST API, web UI
+  server.rs       HTTP server, REST API, embeds web/dist/index.html
   vault/          Multi-vault management
 assets/
-  ui.html         Embedded web interface
+  brand/          Logo SVG + PNG renderings
+  screenshots/    Screenshots used in README
+web/              Svelte 5 + Vite + TypeScript front-end
+  src/
+    lib/          API/MCP/WebLLM clients, stores, design tokens
+    components/   Reusable UI primitives (Mark, Pill, Modal, ...)
+    routes/       Tab views (Dashboard, Ask, Chat, Search, ...)
+    App.svelte    Root, theme, routing
+    main.ts       Mount entry
+  dist/           Built single-file bundle (committed; embedded by Rust)
 scripts/
   build-all.sh    Cross-platform build script
   download-model.sh  Model download for offline use
 ```
+
+## Web UI Development
+
+The web UI is a Svelte 5 + Vite + TypeScript single-page app, built into
+one self-contained HTML file (`web/dist/index.html`) via
+`vite-plugin-singlefile`. The Rust binary embeds it with `include_str!`,
+so `cargo build` works without a JS toolchain — but you need `bun` (or
+`npm`) installed locally to make changes.
+
+```bash
+cd web
+bun install
+bun run dev      # dev server at http://localhost:5173, proxies /api + /mcp
+bun run build    # type-check + bundle into dist/index.html
+bun run check    # type-check only
+```
+
+After editing UI code, run `bun run build`, commit `web/dist/index.html`
+alongside your source changes, and `cargo build` will pick up the new bundle.
 
 ## Supported File Types
 

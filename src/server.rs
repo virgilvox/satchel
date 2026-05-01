@@ -15,7 +15,11 @@ use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::rag::Database;
 
-const UI_HTML: &str = include_str!("../assets/ui.html");
+// The web UI is built from `web/` (Svelte 5 + Vite) into a single
+// self-contained HTML file via `vite-plugin-singlefile`. The build artifact
+// is committed so `cargo build` works without a JS toolchain. Run
+// `bun run build` (or `npm run build`) inside `web/` after editing the UI.
+const UI_HTML: &str = include_str!("../web/dist/index.html");
 
 pub struct AppState {
     pub db: Arc<Database>,
