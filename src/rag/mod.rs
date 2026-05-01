@@ -486,25 +486,32 @@ impl Database {
         })
     }
 
-    /// Return all records (documents) at `source_path` in ingest order. For
-    /// archive handlers that walk source files chronologically, this is the
-    /// chronological message list — useful for showing context around a
-    /// search hit. Capped at `limit` to avoid runaway responses.
+    /// Return records at `source_path` in ingest order, with pagination so
+    /// busy archives (Slack `#general` with 5000+ messages/day) don't blow
+    /// up the response. Returns `(records, total)` so the UI can render
+    /// "showing N of M". Archive handlers that walk files chronologically
+    /// produce chronological output here.
     pub fn list_records_by_source(
         &self,
         source: &str,
         limit: usize,
-    ) -> Result<Vec<ConversationRecord>> {
+        offset: usize,
+    ) -> Result<(Vec<ConversationRecord>, usize)> {
         let conn = self.conn.lock().unwrap();
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM documents WHERE source_path = ?1",
+            params![source],
+            |row| row.get(0),
+        )?;
         let mut stmt = conn.prepare(
             "SELECT d.id, d.title, d.raw_text, d.ingested_at
              FROM documents d
              WHERE d.source_path = ?1
              ORDER BY d.rowid ASC
-             LIMIT ?2",
+             LIMIT ?2 OFFSET ?3",
         )?;
         let records: Vec<ConversationRecord> = stmt
-            .query_map(params![source, limit as i64], |row| {
+            .query_map(params![source, limit as i64, offset as i64], |row| {
                 Ok(ConversationRecord {
                     id: row.get(0)?,
                     title: row.get::<_, Option<String>>(1)?,
@@ -514,7 +521,7 @@ impl Database {
             })?
             .filter_map(|r| r.ok())
             .collect();
-        Ok(records)
+        Ok((records, total as usize))
     }
 
     pub fn get_full_document(&self, source: &str) -> Result<String> {
@@ -525,6 +532,26 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(text)
+    }
+
+    /// Distinct file_types in the vault and how many *grouped sources*
+    /// (deduplicated source_path) each covers. Used to populate
+    /// filter/manage dropdowns in the UI without hardcoding.
+    pub fn list_file_types(&self) -> Result<Vec<(String, usize)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT file_type, COUNT(DISTINCT source_path)
+             FROM documents
+             GROUP BY file_type
+             ORDER BY file_type",
+        )?;
+        let rows: Vec<(String, usize)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 
     pub fn list_tags(&self) -> Result<Vec<(String, usize)>> {
@@ -1521,8 +1548,9 @@ mod tests {
             )
             .unwrap();
         }
-        let records = db.list_records_by_source(path, 100).unwrap();
+        let (records, total) = db.list_records_by_source(path, 100, 0).unwrap();
         assert_eq!(records.len(), 3);
+        assert_eq!(total, 3);
         assert_eq!(records[0].text, "first msg");
         assert_eq!(records[1].text, "second msg");
         assert_eq!(records[2].text, "third msg");
@@ -1530,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_records_by_source_respects_limit() {
+    fn test_list_records_by_source_respects_limit_and_offset() {
         let db = Database::open_memory().unwrap();
         for i in 0..10 {
             db.insert_document(
@@ -1543,15 +1571,44 @@ mod tests {
             )
             .unwrap();
         }
-        let records = db.list_records_by_source("/x.json", 3).unwrap();
-        assert_eq!(records.len(), 3);
+        let (page1, total) = db.list_records_by_source("/x.json", 3, 0).unwrap();
+        assert_eq!(page1.len(), 3);
+        assert_eq!(total, 10);
+        assert_eq!(page1[0].text, "body 0");
+
+        let (page2, _) = db.list_records_by_source("/x.json", 3, 3).unwrap();
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2[0].text, "body 3");
+
+        // Offset past total returns empty without panicking.
+        let (page_empty, _) = db.list_records_by_source("/x.json", 3, 100).unwrap();
+        assert!(page_empty.is_empty());
     }
 
     #[test]
     fn test_list_records_by_source_unknown_source_empty() {
         let db = Database::open_memory().unwrap();
-        let records = db.list_records_by_source("/does/not/exist", 100).unwrap();
+        let (records, total) = db.list_records_by_source("/does/not/exist", 100, 0).unwrap();
         assert!(records.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_list_file_types_groups_by_source_path() {
+        let db = Database::open_memory().unwrap();
+        // Two slack records at the same source_path should count once toward
+        // source_count, not twice.
+        db.insert_document("d1", "/slack/a.json", "slack", None, "x", "h1")
+            .unwrap();
+        db.insert_document("d2", "/slack/a.json", "slack", None, "y", "h2")
+            .unwrap();
+        db.insert_document("d3", "/slack/b.json", "slack", None, "z", "h3")
+            .unwrap();
+        db.insert_document("d4", "/note.md", "md", None, "w", "h4")
+            .unwrap();
+        let types = db.list_file_types().unwrap();
+        // Sorted alphabetically by file_type: ("md", 1), ("slack", 2)
+        assert_eq!(types, vec![("md".to_string(), 1), ("slack".to_string(), 2)]);
     }
 
     #[test]

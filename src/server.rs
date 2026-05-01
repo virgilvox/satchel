@@ -48,6 +48,7 @@ pub fn build_router(db: Database, embedder: Embedder) -> Router {
         .route("/api/jobs", get(api_jobs))
         .route("/api/jobs/:id", get(api_job_get))
         .route("/api/conversation", get(api_conversation))
+        .route("/api/types", get(api_types))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -444,6 +445,15 @@ async fn api_ingest(
         chunk_overlap: req.chunk_overlap.unwrap_or(64),
     };
 
+    // Fail fast if there's no embedder — every record would fail otherwise
+    // and the user would see "all N records failed" only after a long wait.
+    if !state.embedder.is_available() {
+        return Json(json!({
+            "error": "embedding model unavailable; ingest would fail. Run \
+                      ./scripts/download-model.sh or rebuild with --features embed-model"
+        }));
+    }
+
     // Register the job and return its id immediately. The actual ingest
     // runs in the background; the UI polls /api/jobs for live counters.
     let job_id = state.jobs.create(path.to_string_lossy().to_string());
@@ -480,16 +490,23 @@ async fn api_ingest(
             });
         });
 
-        let result = crate::ingest::ingest_path(&path, &db, &embedder, &config, &progress);
+        // catch_unwind so a panic inside the ingest pipeline (mutex
+        // poisoning, allocation failure, malformed data we didn't
+        // anticipate) leaves the job marked Failed instead of stuck on
+        // Running forever. AssertUnwindSafe is OK here: the values we
+        // borrow into the closure are only mutated through Mutexes, and
+        // we don't reuse them after a panic.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::ingest::ingest_path(&path, &db, &embedder, &config, &progress)
+        }));
 
         jobs.update(&job_for_finish, |j| {
             j.current_file = None;
             j.finished_at = Some(chrono::Utc::now().to_rfc3339());
-            match &result {
-                Ok(_) => {
-                    // If every record failed (e.g. embedder unavailable), the
-                    // pipeline returns Ok overall but the job is effectively a
-                    // failure from the user's POV. Mark accordingly.
+            match result {
+                Ok(Ok(_)) => {
+                    // Pipeline reports Ok but every record failed — usually a
+                    // missing embedder. Treat as failure for the user's sake.
                     if j.records_added == 0 && j.records_failed > 0 {
                         j.status = JobStatus::Failed;
                         j.error = Some(format!(
@@ -500,9 +517,18 @@ async fn api_ingest(
                         j.status = JobStatus::Completed;
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     j.status = JobStatus::Failed;
                     j.error = Some(e.to_string());
+                }
+                Err(panic) => {
+                    j.status = JobStatus::Failed;
+                    let msg = panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    j.error = Some(format!("ingest task panicked: {msg}"));
                 }
             }
         });
@@ -519,6 +545,7 @@ async fn api_jobs(State(state): State<Arc<AppState>>) -> Json<Value> {
 struct ConversationQuery {
     source: String,
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 async fn api_conversation(
@@ -526,11 +553,26 @@ async fn api_conversation(
     Query(q): Query<ConversationQuery>,
 ) -> Json<Value> {
     let limit = q.limit.unwrap_or(2000).min(10_000);
-    match state.db.list_records_by_source(&q.source, limit) {
-        Ok(records) => Json(json!({
+    let offset = q.offset.unwrap_or(0);
+    match state.db.list_records_by_source(&q.source, limit, offset) {
+        Ok((records, total)) => Json(json!({
             "source": q.source,
             "records": records,
+            "total": total,
+            "offset": offset,
             "limit": limit,
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_types(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match state.db.list_file_types() {
+        Ok(types) => Json(json!({
+            "types": types
+                .into_iter()
+                .map(|(t, n)| json!({ "file_type": t, "source_count": n }))
+                .collect::<Vec<_>>()
         })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }

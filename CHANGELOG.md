@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.2.2 — 2026-04-30
+
+Audit pass on v0.2.1.
+
+### Reliability
+
+- **Ingest jobs now survive panics.** The background task wraps the pipeline
+  in `catch_unwind`. Previously, a panic inside `ingest_path` (mutex
+  poisoning, allocation failure, malformed data we didn't anticipate) left
+  the job stuck on `running` forever and held a slot in the bounded retention
+  list. Now the job is marked `failed` with the panic message in `error`.
+- **`POST /api/ingest` fails fast when the embedding model is unavailable.**
+  Previously the job would queue, run for a long time, and end with "all N
+  records failed". Now the request returns a clear error before queueing.
+
+### `/api/types` endpoint
+
+```
+GET /api/types  →  {types: [{file_type, source_count}, ...]}
+```
+
+The Manage tab's "delete by file type" dropdown and the Documents tab's
+type filter are now populated dynamically from this endpoint instead of a
+hardcoded HTML list. New formats added to the codebase show up
+automatically; an empty vault doesn't show options that aren't there. The
+list is cached client-side and invalidated after each ingest/delete.
+
+### `/api/conversation` pagination
+
+The endpoint now accepts `?offset=` and returns `{records, total, offset, limit}`
+so a Slack `#general` with thousands of messages in a single day is
+paginatable instead of getting clipped at the 2000 cap silently. Default
+limit unchanged (2000), max raised to 10000.
+
+### Score display
+
+Search result cards now show the RRF score multiplied by 100, formatted
+to two decimals (e.g. `2.74` instead of `0.027`). Title attribute
+explains "Reciprocal Rank Fusion score (×100). Higher is better." Same
+ranking, less mistakable for noise.
+
+### Tests
+
+132 unit + 23 integration tests pass. New: `test_list_records_by_source_respects_limit_and_offset`,
+`test_list_file_types_groups_by_source_path`.
+
+### Known issues flagged but not fixed in this release
+
+- O(n²) thread-reply scan in the Slack handler. Negligible for typical day
+  files (<200 messages); would matter for >5000 msgs/day. Optimization for
+  v0.2.x or v0.3.
+- `/api/jobs` has no `status=` filter. The UI fetches all 100 retained jobs
+  even when only polling for active ones. Minor.
+
+---
+
 ## v0.2.1 — 2026-04-30
 
 Quality-of-life pass on top of v0.2.0.

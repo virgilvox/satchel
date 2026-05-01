@@ -245,19 +245,6 @@ section.active{display:block}
     <div class="ingest-row">
       <select id="manage-type">
         <option value="">Choose type&hellip;</option>
-        <option value="json">json</option>
-        <option value="md">md</option>
-        <option value="pdf">pdf</option>
-        <option value="docx">docx</option>
-        <option value="html">html</option>
-        <option value="csv">csv</option>
-        <option value="txt">txt</option>
-        <option value="slack">slack (archive records)</option>
-        <option value="chatgpt">chatgpt</option>
-        <option value="claude.ai">claude.ai</option>
-        <option value="discord">discord</option>
-        <option value="whatsapp">whatsapp</option>
-        <option value="mbox">mbox</option>
       </select>
       <button id="manage-type-preview">Preview</button>
       <button id="manage-type-delete" class="danger">Delete matches</button>
@@ -359,16 +346,20 @@ function renderResults(targetId, append) {
     target.innerHTML = '<div class="empty">No results found.</div>';
     return;
   }
-  const cards = st.results.map((r, idx) =>
-    '<div class="result" data-idx="' + idx + '">' +
+  const cards = st.results.map((r, idx) => {
+    // RRF scores are scale-free (typical hits land in 0.01–0.05). Multiplying
+    // by 100 gives a readable two-decimal number that ranks results clearly
+    // without being mistaken for a probability.
+    const display = (r.score * 100).toFixed(2);
+    return '<div class="result" data-idx="' + idx + '">' +
       '<div class="meta">' +
         '<span>' + escHtml(r.source) + '</span>' +
         '<span><a href="#" class="context-link" data-target="' + targetId + '" data-idx="' + idx + '">Show context</a> &nbsp;' +
-        '<span class="score">' + r.score.toFixed(3) + '</span></span>' +
+        '<span class="score" title="Reciprocal Rank Fusion score (×100). Higher is better.">' + display + '</span></span>' +
       '</div>' +
       '<div class="text">' + escHtml(r.text) + '</div>' +
-    '</div>'
-  ).join('');
+    '</div>';
+  }).join('');
   const more = st.results.length < st.total
     ? '<div class="load-more-wrap"><span class="load-more-info">Showing ' + st.results.length + ' of ' + st.total + '</span>' +
       '<button class="load-more-btn" data-target="' + targetId + '">Load more</button></div>'
@@ -526,24 +517,45 @@ async function loadMoreDocs() {
   } catch (e) {}
 }
 
+// Fetch the canonical list of file_types from the server. Used to populate
+// both the Documents-tab filter dropdown and the Manage-tab delete-by-type
+// dropdown, so they always reflect what's actually in the vault.
+let cachedTypes = null;
+async function fetchTypes() {
+  if (cachedTypes) return cachedTypes;
+  try {
+    const r = await fetch(API + '/api/types');
+    const d = await r.json();
+    cachedTypes = (d.types || []).map(t => ({ name: t.file_type, count: t.source_count }));
+    return cachedTypes;
+  } catch (e) {
+    return [];
+  }
+}
+
 async function populateTypeOptions() {
-  // Probe: count distinct file_types via a single call asking only the first
-  // page sorted by chunks. Cheap heuristic — we infer from the first page
-  // plus what we already accumulated. For exhaustive accuracy a /api/types
-  // endpoint would be cleaner; fine for now.
-  const seen = new Set(['']);
-  for (const s of docState.sources) {
-    if (s.file_type) seen.add(s.file_type);
+  const types = await fetchTypes();
+  const filterSel = document.getElementById('doc-type');
+  const manageSel = document.getElementById('manage-type');
+
+  function fill(sel, includeCounts, placeholder) {
+    if (!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">' + placeholder + '</option>' +
+      types.map(t => {
+        const label = includeCounts ? t.name + ' (' + t.count + ')' : t.name;
+        return '<option value="' + escHtml(t.name) + '">' + escHtml(label) + '</option>';
+      }).join('');
+    if (current && types.some(t => t.name === current)) {
+      sel.value = current;
+    }
   }
-  const sel = document.getElementById('doc-type');
-  const current = sel.value;
-  const types = Array.from(seen).sort();
-  // Only update if changed to avoid losing focus.
-  if (sel.children.length - 1 !== types.length - 1) {
-    sel.innerHTML = '<option value="">All types</option>' +
-      types.filter(t => t).map(t => '<option value="' + t + '">' + escHtml(t) + '</option>').join('');
-    sel.value = current;
-  }
+  fill(filterSel, true, 'All types');
+  fill(manageSel, true, 'Choose type…');
+}
+
+function invalidateTypeCache() {
+  cachedTypes = null;
 }
 
 function debouncedReload() {
@@ -698,7 +710,9 @@ async function refreshJobs() {
     } else if (jobsTimer) {
       clearInterval(jobsTimer);
       jobsTimer = null;
-      checkStatus(); // refresh dashboard counters once final
+      // Type list and dashboard stats may have changed during the run.
+      invalidateTypeCache();
+      checkStatus();
     }
   } catch (e) {
     // Silent — don't spam the UI on transient network errors.
@@ -823,7 +837,7 @@ async function deleteOp(body, statusEl, dryRun) {
     const verb = dryRun ? 'Would delete' : 'Deleted';
     statusEl.className = 'ingest-status ok';
     statusEl.textContent = verb + ' ' + d.deleted_documents + ' documents and ' + d.deleted_chunks + ' chunks.';
-    if (!dryRun) checkStatus();
+    if (!dryRun) { invalidateTypeCache(); checkStatus(); }
     return d;
   } catch (e) {
     statusEl.className = 'ingest-status err';
