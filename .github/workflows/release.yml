@@ -83,34 +83,83 @@ jobs:
       - name: Build
         run: cargo build --release --features embed-model --target ${{ matrix.target }}
 
-      - name: Stage binary (unix)
-        if: runner.os != 'Windows'
+      # ─────────────────────────────────────────────────────────────
+      # Per-platform staging. The icon story is different on each OS:
+      #   Windows — already embedded in the .exe via build.rs + winresource.
+      #             Just copy the .exe.
+      #   macOS  — wrap the binary in a Satchel.app bundle so Finder shows
+      #             the icon. Inside: Contents/MacOS/satchel + Info.plist
+      #             + Resources/satchel.icns. zip with `ditto -c -k` to
+      #             preserve the bundle's HFS metadata.
+      #   Linux  — ship the raw binary + satchel.desktop + satchel.png.
+      #             ELF binaries can't host an icon resource; the desktop
+      #             entry references the PNG when the user moves the files
+      #             into ~/.local/share/{applications,icons}/.
+      # ─────────────────────────────────────────────────────────────
+
+      - name: Stage binary (linux)
+        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
         run: |
           cp target/${{ matrix.target }}/release/satchel ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
+          cp assets/brand/satchel.desktop satchel.desktop
+          cp assets/brand/icon-256.png    satchel.png
+
+      - name: Stage binary (macos · .app bundle)
+        if: startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin')
+        run: |
+          APP="Satchel.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/${{ matrix.target }}/release/satchel "$APP/Contents/MacOS/satchel"
+          chmod +x "$APP/Contents/MacOS/satchel"
+          cp assets/brand/satchel.icns "$APP/Contents/Resources/satchel.icns"
+          VERSION=$(grep -E '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>              <string>SATCHEL</string>
+            <key>CFBundleDisplayName</key>       <string>SATCHEL</string>
+            <key>CFBundleIdentifier</key>        <string>com.satchel.app</string>
+            <key>CFBundleVersion</key>           <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundlePackageType</key>       <string>APPL</string>
+            <key>CFBundleExecutable</key>        <string>satchel</string>
+            <key>CFBundleIconFile</key>          <string>satchel.icns</string>
+            <key>LSMinimumSystemVersion</key>    <string>10.15</string>
+            <key>NSHighResolutionCapable</key>   <true/>
+            <key>LSUIElement</key>               <false/>
+          </dict>
+          </plist>
+          PLIST
+          # Ad-hoc sign so the bundle is launchable without spurious "damaged"
+          # warnings. Doesn't bypass Gatekeeper notarization (would need a
+          # paid Developer ID), but at least the bundle has a valid signature.
+          codesign --force --deep --sign - "$APP" || true
+          # Touch so Finder picks up the icon resource.
+          touch "$APP"
 
       - name: Stage binary (windows)
         if: runner.os == 'Windows'
         run: copy target\${{ matrix.target }}\release\satchel.exe ${{ matrix.artifact }}
 
-      - name: Pick platform icon
-        shell: bash
+      - name: Package zip (linux)
+        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+        run: zip -j ${{ matrix.archive }} ${{ matrix.artifact }} satchel.desktop satchel.png
+
+      - name: Package zip (macos)
+        if: startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin')
         run: |
-          case "${{ matrix.target }}" in
-            *apple-darwin*) cp assets/brand/satchel.icns      satchel-icon.icns ;;
-            *windows*)      cp assets/brand/satchel.ico       satchel-icon.ico  ;;
-            *)              cp assets/brand/icon-256.png      satchel-icon.png  ;;
-          esac
-          ls -la satchel-icon.* || true
+          # ditto preserves bundle metadata + the .app's executable bit;
+          # plain `zip` does not.
+          ditto -c -k --keepParent --sequesterRsrc Satchel.app ${{ matrix.archive }}
 
-      - name: Package as zip (unix)
-        if: runner.os != 'Windows'
-        run: zip -j ${{ matrix.archive }} ${{ matrix.artifact }} satchel-icon.*
-
-      - name: Package as zip (windows)
+      - name: Package zip (windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path ${{ matrix.artifact }},satchel-icon.* -DestinationPath ${{ matrix.archive }}
+        run: Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ${{ matrix.archive }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -141,17 +190,31 @@ jobs:
           body: |
             ## Install
 
-            Download the zip for your platform, extract, and run. The embedding model is included.
+            The embedding model is bundled into every binary. No separate download.
+
+            ### macOS
+            Extract the zip — you'll get `Satchel.app` with the SATCHEL icon. Drag to `/Applications` (or anywhere) and double-click. The first launch may be blocked by Gatekeeper — right-click the app in Finder and choose **Open** once to allow it.
+
+            For terminal use: `Satchel.app/Contents/MacOS/satchel ingest ~/notes/` (or symlink it onto your `$PATH`).
+
+            ### Windows
+            Extract `satchel-windows-x86_64.zip`, double-click `satchel-windows-x86_64.exe`. The icon is embedded directly in the executable.
+
+            ### Linux
+            Extract the zip — you get the binary, `satchel.desktop`, and `satchel.png`. Either run the binary directly:
 
             ```bash
-            unzip satchel-macos-aarch64.zip       # also Linux & x86_64 variants
-            ./satchel-macos-aarch64               # launch web UI at http://localhost:7428
-            ./satchel-macos-aarch64 ingest ~/notes/
-            ./satchel-macos-aarch64 config        # MCP config snippet
+            chmod +x satchel-linux-x86_64
+            ./satchel-linux-x86_64
             ```
 
-            On Windows, double-click the .zip to extract, then run `satchel-windows-x86_64.exe`.
+            …or install the desktop entry so it shows up in your launcher with the SATCHEL icon:
 
-            On macOS the first launch may be blocked by Gatekeeper — right-click the binary in Finder and choose "Open" once to allow it.
+            ```bash
+            install -Dm755 satchel-linux-x86_64 ~/.local/bin/satchel
+            install -Dm644 satchel.png ~/.local/share/icons/hicolor/256x256/apps/satchel.png
+            install -Dm644 satchel.desktop ~/.local/share/applications/satchel.desktop
+            update-desktop-database ~/.local/share/applications 2>/dev/null || true
+            ```
 
             A default vault is created automatically on first run. See the [README](https://github.com/virgilvox/satchel#readme) for full documentation.

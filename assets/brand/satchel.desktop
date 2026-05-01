@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SATCHEL
+GenericName=Portable RAG
+Comment=Self-contained Augmented Text Corpus for Host-free Embedded Lookup
+Exec=satchel serve
+Icon=satchel
+Terminal=false
+Categories=Office;Development;Utility;
+Keywords=rag;mcp;embeddings;knowledge;search;
+StartupNotify=true

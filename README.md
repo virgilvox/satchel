@@ -13,22 +13,51 @@ Portable RAG on a stick. Download one file, run it, and your entire knowledge ba
 |---|---|
 | ![Ask](assets/screenshots/02-ask.png) | ![Chat](assets/screenshots/03-chat.png) |
 | ![Search](assets/screenshots/04-search.png) | ![Documents](assets/screenshots/05-documents.png) |
-| ![Connect](assets/screenshots/06-connect.png) | |
+| ![Ingest](assets/screenshots/07-ingest.png) | ![Connect](assets/screenshots/06-connect.png) |
 
 ## Get Started
 
-**1. Download** the zip for your platform from the [latest release](https://github.com/virgilvox/satchel/releases/latest). The embedding model is included. Nothing else to install.
+**1. Download** the zip for your platform from the [latest release](https://github.com/virgilvox/satchel/releases/latest). The embedding model is bundled in. Nothing else to install.
 
-**2. Extract and run:**
+**2. Extract and run.** The platform handles the icon for you.
+
+### macOS
+
+The zip extracts to `Satchel.app` — a real macOS bundle with the SATCHEL icon. Drag it to `/Applications` (or anywhere), then double-click. The first launch may be blocked by Gatekeeper — right-click the app in Finder and choose **Open** once to allow it. The web UI opens automatically at [http://localhost:7428](http://localhost:7428).
+
+Terminal users can call the binary directly out of the bundle:
 
 ```bash
-unzip satchel-macos-aarch64.zip
-./satchel-macos-aarch64
+Satchel.app/Contents/MacOS/satchel ingest ~/Documents/notes/
+Satchel.app/Contents/MacOS/satchel config
 ```
 
-This starts the web UI at [http://localhost:7428](http://localhost:7428) and opens it in your default browser. A default vault is created automatically on first run. On macOS, the first launch may be blocked by Gatekeeper — right-click the binary in Finder and choose "Open" once to allow it.
+…or symlink it onto your `$PATH` once: `ln -s "$PWD/Satchel.app/Contents/MacOS/satchel" /usr/local/bin/satchel`.
 
-Pass `--no-browser` (or run from a non-interactive shell) to suppress the auto-open.
+### Windows
+
+Double-click the .zip to extract, then run `satchel-windows-x86_64.exe`. The SATCHEL mark is embedded in the .exe via a Windows resource — Explorer / Alt-Tab / Task Manager all show it without extra files.
+
+### Linux
+
+The zip contains the binary plus `satchel.desktop` and `satchel.png` (ELF binaries can't host an icon resource — Linux uses the `.desktop` entry instead). Either run the binary directly:
+
+```bash
+unzip satchel-linux-x86_64.zip
+chmod +x satchel-linux-x86_64
+./satchel-linux-x86_64
+```
+
+…or install the desktop entry so SATCHEL shows up in your application launcher with the icon:
+
+```bash
+install -Dm755 satchel-linux-x86_64 ~/.local/bin/satchel
+install -Dm644 satchel.png ~/.local/share/icons/hicolor/256x256/apps/satchel.png
+install -Dm644 satchel.desktop ~/.local/share/applications/satchel.desktop
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+```
+
+A default vault is created automatically on first run. Pass `--no-browser` (or run from a non-interactive shell) to suppress the auto-open.
 
 **3. Ingest your documents** — paste a path into the Ingest tab in the UI, or from the CLI:
 

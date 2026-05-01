@@ -233,11 +233,22 @@ async fn main() -> Result<()> {
             match transport.as_str() {
                 "stdio" => mcp::stdio::serve(db, embedder).await?,
                 "http" | "sse" => {
-                    // Auto-open the UI when running interactively. Skip when
-                    // piped/CI (no terminal) so headless deploys don't try to
-                    // launch a browser, and when --no-browser is set.
+                    // Auto-open the UI when running interactively. Three
+                    // signals indicate "user double-clicked or ran in a
+                    // terminal — show them the UI": (1) stderr is a TTY
+                    // (terminal launch), (2) `__CFBundleIdentifier` is set
+                    // (Finder launched a macOS .app bundle), (3) the binary
+                    // path contains `.app/Contents/MacOS` (covers older
+                    // macOS that doesn't set the env var). Headless / CI /
+                    // pipe-stderr launches still skip auto-open.
                     use std::io::IsTerminal;
-                    let open = !no_browser && std::io::stderr().is_terminal();
+                    let in_macos_bundle = std::env::var_os("__CFBundleIdentifier").is_some()
+                        || std::env::current_exe()
+                            .ok()
+                            .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS")))
+                            .unwrap_or(false);
+                    let open = !no_browser
+                        && (std::io::stderr().is_terminal() || in_macos_bundle);
                     server::serve(db, embedder, port, open).await?
                 }
                 other => anyhow::bail!("Unknown transport: {other}. Use 'stdio' or 'http'."),

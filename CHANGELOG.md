@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.3.5 — 2026-05-01
+
+### Icon actually shows on the executable (per-OS, the only way each OS allows)
+
+v0.3.3 shipped `.icns` and `.png` files alongside the binary in the
+release zip. That was useless: macOS still drew the generic Unix-exec
+icon on `satchel-macos-aarch64`, and Linux still drew its generic ELF
+chevron, because **a raw single-file binary cannot host an icon
+resource on either OS**. v0.3.5 ships each platform the way that
+platform actually wants:
+
+- **macOS** — the zip now contains `Satchel.app`, a real bundle:
+  `Contents/MacOS/satchel` is the binary, `Contents/Resources/satchel.icns`
+  is the icon, `Contents/Info.plist` declares them, and the bundle is
+  ad-hoc `codesign`'d so Gatekeeper accepts the signature (full
+  notarization still requires a paid Developer ID — README documents
+  the right-click → Open workaround). Packed with `ditto -c -k
+  --keepParent --sequesterRsrc` to preserve bundle metadata. Finder
+  shows the SATCHEL mark; double-click launches the server and opens
+  the browser. Terminal users call the inner binary directly:
+  `Satchel.app/Contents/MacOS/satchel`.
+- **Windows** — already correct since v0.3.3 (icon embedded in the
+  `.exe` via `winresource` + `build.rs`). No change.
+- **Linux** — ELF binaries cannot host an icon resource period; the
+  Linux convention is a `.desktop` entry referencing a PNG from the
+  hicolor theme. The release zip now ships `satchel.desktop` and
+  `satchel.png` alongside the binary, with copy-paste install steps in
+  the README that put them in `~/.local/share/{applications,icons}/`.
+
+### Bundle-aware auto-open
+
+Double-clicking `Satchel.app` from Finder runs with no controlling TTY,
+so the existing "open browser when stderr is a terminal" gate would
+have left the user staring at a blank screen. `main.rs` now also opens
+the browser when `__CFBundleIdentifier` is set (Finder launch) or the
+binary path contains `.app/Contents/MacOS` (older macOS fallback).
+Headless / CI / piped-stderr launches continue to skip auto-open.
+
+### README + screenshots
+
+- New ingest screenshot (running mbox job, post-truncation-fix)
+  captured by the user on a real vault — added to the gallery.
+- "Get Started" rewritten with per-OS install paths.
+- Release notes follow the same per-OS structure.
+
 ## v0.3.4 — 2026-05-01
 
 ### Chat: constrained-mode tool calling that works with any model
