@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import Composer from '../components/Composer.svelte';
   import MessageBubble from '../components/MessageBubble.svelte';
@@ -6,6 +7,7 @@
   import Pill from '../components/Pill.svelte';
   import Dot from '../components/Dot.svelte';
   import StatusLine from '../components/StatusLine.svelte';
+  import SettingsModal from '../components/SettingsModal.svelte';
   import {
     MODELS,
     checkSupport,
@@ -20,8 +22,10 @@
     parseConstrainedOutput,
   } from '../lib/agent';
   import { McpClient } from '../lib/mcp';
-  import { settings } from '../lib/stores.svelte';
+  import { settings, chatSettings } from '../lib/stores.svelte';
   import type { ChatMessage, McpTool, ToolCallResult } from '../lib/types';
+
+  const TRANSCRIPT_KEY = 'satchel-chat-transcript';
 
   // ---- Model state ----
   let support = $state<{ supported: boolean; reason?: string } | null>(null);
@@ -43,10 +47,18 @@
   let stream: HTMLDivElement;
   let useLooseSchema = $state(false);
   let round = $state(0);
-  const MAX_ROUNDS = 10;
+  // Token bookkeeping for the context indicator. Filled in from
+  // chunk.usage on each successful turn; cleared on clear-chat.
+  let lastUsage = $state<{ prompt: number; total: number; window: number }>({
+    prompt: 0,
+    total: 0,
+    window: 0,
+  });
+  let contextFull = $state(false);
 
-  // ---- Mobile drawer ----
+  // ---- Mobile drawer + settings modal ----
   let railOpen = $state(false);
+  let settingsOpen = $state(false);
 
   $effect(() => {
     checkSupport().then((s) => (support = s));
@@ -56,13 +68,79 @@
     if (mcpStatus === 'idle') connectMcp();
   });
 
+  // Restore the transcript from localStorage on mount (one-shot).
+  // Only happens when persist_history is on.
+  onMount(() => {
+    if (!chatSettings.persistHistory) return;
+    try {
+      const raw = localStorage.getItem(TRANSCRIPT_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as ChatMessage[];
+      if (Array.isArray(parsed) && parsed.length) {
+        // Drop streaming flags from a previous session — anything with
+        // streaming:true was an in-flight turn that never completed.
+        transcript = parsed.map((m) => ({ ...m, streaming: false }));
+      }
+    } catch {
+      /* corrupt JSON — ignore */
+    }
+  });
+
+  // Persist transcript to localStorage on every change (when enabled).
+  // Tool call results can be large; cap each one at 8 KB so we don't
+  // blow past the 5 MB localStorage budget on a long research session.
+  $effect(() => {
+    if (!chatSettings.persistHistory) return;
+    try {
+      const compact = transcript.map((m) => {
+        if (!m.toolCalls) return m;
+        return {
+          ...m,
+          toolCalls: m.toolCalls.map((tc) => ({
+            ...tc,
+            result:
+              tc.result && tc.result.length > 8000
+                ? tc.result.slice(0, 6000) +
+                  '\n…[truncated ' +
+                  (tc.result.length - 8000) +
+                  ' chars]…\n' +
+                  tc.result.slice(-2000)
+                : tc.result,
+          })),
+        };
+      });
+      localStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(compact));
+    } catch {
+      /* quota exceeded / private mode — best effort */
+    }
+  });
+
   async function loadModel() {
     if (loading || !support?.supported) return;
     loading = true;
     loadError = undefined;
     progress = { text: 'starting...', progress: 0, timeElapsed: 0 };
     try {
-      engine = await createEngine(settings.chatModel, (p) => (progress = p));
+      const ctx =
+        chatSettings.contextWindowSize !== 'auto'
+          ? Number(chatSettings.contextWindowSize)
+          : undefined;
+      const sliding =
+        chatSettings.slidingWindowSize !== 'off'
+          ? Number(chatSettings.slidingWindowSize)
+          : undefined;
+      engine = await createEngine(
+        settings.chatModel,
+        (p) => (progress = p),
+        { contextWindowSize: ctx, slidingWindowSize: sliding }
+      );
+      // Capture the live context-window size for the in-chat indicator.
+      // We use the override if the user picked one, else fall back to the
+      // model's compiled default which we don't know precisely without
+      // poking WebLLM internals — 4096 is the safe lower bound used by
+      // most q4f16_1 builds.
+      lastUsage = { prompt: 0, total: 0, window: ctx ?? 4096 };
+      contextFull = false;
     } catch (e) {
       loadError = (e as Error).message;
       engine = null;
@@ -130,6 +208,11 @@
   function clearChat() {
     if (busy) cancel();
     transcript = [];
+    lastUsage = { prompt: 0, total: 0, window: lastUsage.window };
+    contextFull = false;
+    try {
+      localStorage.removeItem(TRANSCRIPT_KEY);
+    } catch {}
   }
 
   // The main agent loop. Each round:
@@ -138,16 +221,16 @@
   //      the agent schema — output is always valid JSON)
   //   3. Parse the JSON: either a tool_call (dispatch via MCP) or a
   //      `respond_to_user` (terminal — write the answer and stop)
-  //   4. Loop until terminal, MAX_ROUNDS, or abort
+  //   4. Loop until terminal, max-rounds, or abort
   async function runLoop(): Promise<void> {
     if (!engine) return;
     const sys = constrainedSystemPrompt({
       tools,
-      minToolCalls: 1,
-      weakScoreThreshold: 0.05,
+      minToolCalls: chatSettings.minToolCalls,
+      weakScoreThreshold: chatSettings.weakScoreThreshold,
     });
 
-    while (round < MAX_ROUNDS && !abortFlag) {
+    while (round < chatSettings.maxRounds && !abortFlag) {
       round += 1;
 
       const aId = crypto.randomUUID();
@@ -167,8 +250,8 @@
           {
             messages,
             schema: JSON.stringify(schemaObj),
-            temperature: 0.6,
-            max_tokens: 1024,
+            temperature: chatSettings.temperature,
+            max_tokens: chatSettings.maxTokens,
           },
           (delta) => {
             streamed += delta;
@@ -185,7 +268,13 @@
         // XGrammar can reject some MCP tool argument schemas even after
         // sanitization. Fall back to the loose schema for this turn and
         // retry once.
-        const looksLikeSchemaErr = /grammar|schema|xgrammar|unsupported/i.test(msg);
+        const looksLikeSchemaErr = /grammar|xgrammar|unsupported/i.test(msg);
+        // WebLLM throws "Prompt tokens exceed context window size" once
+        // the agent transcript outgrows the model's compiled window.
+        // Surface a friendly hint with the actionable fixes — bump
+        // context_window_size in settings (then UNLOAD + LOAD), enable
+        // sliding window, or clear the chat — instead of the raw error.
+        const looksLikeCtxErr = /exceed context window|context window size|sliding_window/i.test(msg);
         if (looksLikeSchemaErr && !useLooseSchema) {
           useLooseSchema = true;
           transcript = transcript.filter((m) => m.id !== aId);
@@ -200,12 +289,38 @@
           ];
           continue;
         }
+        if (looksLikeCtxErr) {
+          contextFull = true;
+          transcript = transcript.map((m) =>
+            m.id !== aId
+              ? m
+              : {
+                  ...m,
+                  role: 'error' as const,
+                  streaming: false,
+                  content:
+                    'Context full — the conversation grew past the model\'s window.\n\nFix one of: (1) open ⚙ Settings → Context, bump context_window_size to 8192, then UNLOAD + LOAD; (2) enable sliding_window_size to keep the most recent N tokens; (3) Clear chat to start fresh.\n\nRaw: ' +
+                    msg,
+                },
+          );
+          return;
+        }
         transcript = transcript.map((m) =>
           m.id !== aId
             ? m
             : { ...m, role: 'error' as const, streaming: false, content: msg }
         );
         return;
+      }
+
+      // Update the context indicator from the WebLLM usage payload.
+      if (result?.usage?.total_tokens) {
+        lastUsage = {
+          prompt: result.usage.prompt_tokens ?? lastUsage.prompt,
+          total: result.usage.total_tokens,
+          window: lastUsage.window,
+        };
+        contextFull = lastUsage.window > 0 && lastUsage.total >= lastUsage.window;
       }
 
       const parsed = parseConstrainedOutput(result?.content ?? streamed);
@@ -288,13 +403,13 @@
       // Loop back: feed the tool result into the next round.
     }
 
-    if (round >= MAX_ROUNDS) {
+    if (round >= chatSettings.maxRounds) {
       transcript = [
         ...transcript,
         {
           id: crypto.randomUUID(),
           role: 'error',
-          content: `Hit MAX_ROUNDS (${MAX_ROUNDS}). The model didn't reach a respond_to_user — try a stronger model or rephrase.`,
+          content: `Hit max_rounds (${chatSettings.maxRounds}). The model didn't reach a respond_to_user — try a stronger model, rephrase, or bump max_rounds in ⚙ Settings.`,
         },
       ];
     }
@@ -363,6 +478,17 @@
   let progressPct = $derived(Math.round((progress.progress || 0) * 100));
   let modelInfo = $derived(MODELS.find((m) => m.id === settings.chatModel));
   let canSend = $derived(!!engine && !busy);
+
+  // Context-fill indicator: turns amber > 80%, danger > 95%.
+  let ctxPct = $derived.by(() => {
+    if (!lastUsage.window || !lastUsage.total) return 0;
+    return Math.min(100, Math.round((lastUsage.total / lastUsage.window) * 100));
+  });
+  let ctxTone: 'teal' | 'amber' | 'danger' = $derived.by(() => {
+    if (ctxPct >= 95) return 'danger';
+    if (ctxPct >= 80) return 'amber';
+    return 'teal';
+  });
 </script>
 
 <ViewHead num="08" title={`CHAT <span class="slash">/</span> BROWSER LLM + MCP`}
@@ -390,15 +516,33 @@
       <Pill tone="danger"><Dot tone="danger" /><span class="pill-text">mcp error</span></Pill>
     {/if}
     {#if busy}
-      <Pill tone="amber"><Dot tone="amber" pulse /><span class="pill-text">round {round}/{MAX_ROUNDS}</span></Pill>
+      <Pill tone="amber"><Dot tone="amber" pulse /><span class="pill-text">round {round}/{chatSettings.maxRounds}</span></Pill>
+    {/if}
+    {#if engine && lastUsage.total > 0}
+      <Pill tone={ctxTone}>
+        <Dot tone={ctxTone} />
+        <span class="pill-text">ctx {ctxPct}% · {lastUsage.total}t</span>
+      </Pill>
     {/if}
   </div>
   <div class="strip-right">
+    <button class="icon-btn" type="button" title="Chat settings" aria-label="Chat settings"
+      onclick={() => (settingsOpen = true)}>⚙</button>
     {#if transcript.length > 0}
       <button class="btn btn-secondary btn-sm" type="button" onclick={clearChat}>CLEAR</button>
     {/if}
   </div>
 </div>
+
+{#if contextFull}
+  <div class="ctx-banner">
+    <strong>Context full.</strong>
+    Open <button class="link" type="button" onclick={() => (settingsOpen = true)}>⚙ Settings → Context</button>
+    and bump <code>context_window_size</code> to 8192 (then UNLOAD + LOAD), or
+    <button class="link" type="button" onclick={clearChat}>clear chat</button>
+    to start fresh.
+  </div>
+{/if}
 
 <div class="layout">
   <!-- Rail: collapsed off-canvas on mobile, sticky sidebar on desktop -->
@@ -508,6 +652,19 @@
   </div>
 </div>
 
+{#if chatSettings.showSystemPrompt && tools.length}
+  <details class="sys-debug">
+    <summary>SYSTEM PROMPT (debug)</summary>
+    <pre>{constrainedSystemPrompt({
+      tools,
+      minToolCalls: chatSettings.minToolCalls,
+      weakScoreThreshold: chatSettings.weakScoreThreshold,
+    })}</pre>
+  </details>
+{/if}
+
+<SettingsModal open={settingsOpen} onClose={() => (settingsOpen = false)} engineLoaded={!!engine} />
+
 <style>
   .strip {
     display: flex;
@@ -542,6 +699,82 @@
     transition: 120ms ease;
   }
   .rail-toggle:hover { color: var(--amber); border-color: var(--amber-line); }
+
+  .icon-btn {
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 1;
+    padding: 6px 10px;
+    background: var(--surface);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: 120ms ease;
+  }
+  .icon-btn:hover { color: var(--amber); border-color: var(--amber-line); }
+
+  .ctx-banner {
+    border: 1px solid var(--amber-line);
+    background: var(--amber-soft);
+    color: var(--text);
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .ctx-banner strong { color: var(--amber); margin-right: 6px; }
+  .ctx-banner code {
+    color: var(--teal);
+    background: var(--teal-soft);
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+  .ctx-banner .link {
+    color: var(--teal);
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .ctx-banner .link:hover { color: var(--teal-deep); }
+
+  .sys-debug {
+    margin-top: 18px;
+    border: 1px dashed var(--border-strong);
+    background: var(--surface);
+  }
+  .sys-debug summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 8px 12px;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    user-select: none;
+  }
+  .sys-debug summary::before {
+    content: '▸';
+    color: var(--text-dim);
+    margin-right: 8px;
+    display: inline-block;
+    transition: transform 120ms ease;
+  }
+  .sys-debug[open] summary::before { transform: rotate(90deg); }
+  .sys-debug pre {
+    padding: 12px 14px;
+    border-top: 1px dashed var(--border);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    overflow-x: auto;
+    max-height: 360px;
+    overflow-y: auto;
+  }
 
   .layout {
     display: grid;

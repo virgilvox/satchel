@@ -14,6 +14,16 @@ export interface InitProgress {
   timeElapsed: number;
 }
 
+/** Per-engine overrides forwarded to WebLLM at create time. The context
+ *  knobs are the load-bearing ones — Hermes 3 3B compiles to a 4096-token
+ *  context by default and a 4-turn agent transcript blows past that.
+ *  Setting `contextWindowSize` to 8192 (when the model supports it) or
+ *  enabling `slidingWindowSize` gets you out of the jam. */
+export interface EngineChatOpts {
+  contextWindowSize?: number;
+  slidingWindowSize?: number;
+}
+
 export interface EngineHandle {
   modelId: string;
   unload: () => Promise<void>;
@@ -164,12 +174,24 @@ export async function checkSupport(): Promise<{ supported: boolean; reason?: str
 
 export async function createEngine(
   modelId: string,
-  onProgress: (p: InitProgress) => void
+  onProgress: (p: InitProgress) => void,
+  chatOpts?: EngineChatOpts
 ): Promise<EngineHandle> {
   const webllm = await loadLib();
-  const engine = await webllm.CreateMLCEngine(modelId, {
-    initProgressCallback: (p: InitProgress) => onProgress(p),
-  });
+  // WebLLM's third-arg `chatOpts` accepts `context_window_size` and
+  // `sliding_window_size` (snake_case in the underlying TS types).
+  // Only forward keys the user explicitly set so we don't override
+  // model defaults unintentionally.
+  const llmChatOpts: Record<string, number> = {};
+  if (chatOpts?.contextWindowSize) llmChatOpts.context_window_size = chatOpts.contextWindowSize;
+  if (chatOpts?.slidingWindowSize) llmChatOpts.sliding_window_size = chatOpts.slidingWindowSize;
+  const opts = Object.keys(llmChatOpts).length ? llmChatOpts : undefined;
+
+  const engine = await webllm.CreateMLCEngine(
+    modelId,
+    { initProgressCallback: (p: InitProgress) => onProgress(p) },
+    opts as any
+  );
 
   return {
     modelId,

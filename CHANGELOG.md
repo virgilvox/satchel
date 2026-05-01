@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.1.0 — 2026-05-01
+
+### Chat: settings modal + context-fill recovery
+
+A 4-turn agent transcript on Hermes 3 3B blew past the model's compiled
+4096-token context window — WebLLM threw "Prompt tokens exceed context
+window size" and the user was left staring at a raw error with no
+recourse. Lifted the mockup's settings pattern into a proper modal and
+fixed the underlying gap.
+
+- **`web/src/components/SettingsModal.svelte`** — gear button (⚙) in the
+  chat strip opens a modal with four sections: Generation, Agent,
+  Context, Persistence. Each setting has a name, a live value readout,
+  a control (range / select / checkbox), and a one-line description
+  explaining what it does and when to change it. Lifted from the mockup's
+  settings pattern at `mockups/satchel-chat (15).html`.
+- **`context_window_size` and `sliding_window_size` are now wired all
+  the way through.** `lib/webllm.ts:createEngine` accepts an
+  `EngineChatOpts`; `Chat.svelte:loadModel` reads from `chatSettings`
+  and forwards them to `CreateMLCEngine` as the third argument
+  (snake_case, matching WebLLM's TS types). Picking 8192 / 16384 /
+  32768 takes effect on the next UNLOAD + LOAD; the modal flags this
+  with `· UNLOAD + RELOAD to apply` while the engine is hot.
+- **Context-fill indicator** in the chat strip — once the engine
+  reports `usage.total_tokens`, a `ctx 47% · 1923t` pill appears.
+  Turns amber > 80%, red > 95%.
+- **Friendly recovery from `Prompt tokens exceed context window size`.**
+  The error catch detects this case specifically and writes a banner
+  with the actionable fixes (open ⚙ Settings → Context, bump
+  `context_window_size`; or enable `sliding_window_size`; or clear
+  chat) instead of dumping the raw stack at the user.
+- **Transcript persists to localStorage.** Refresh-survival, on by
+  default; toggle in Persistence. Tool-call results larger than 8 KB
+  are head+tail truncated so a long research session doesn't blow
+  past the localStorage budget.
+- **All hard-coded knobs are now settings-driven.** `MAX_ROUNDS`,
+  `min_tool_calls`, `weak_score_threshold`, `temperature`, `max_tokens`
+  all read from `chatSettings` instead of constants. Defaults match
+  what was hard-coded so existing behavior is preserved.
+- **Show-system-prompt toggle** under Persistence reveals the actual
+  prompt being sent to the model in a collapsible panel below the
+  composer — useful when debugging unexpected behavior.
+
+Headless smoke (Playwright, desktop + 390 px mobile): modal opens on
+both, all four sections render, the temperature slider writes to
+localStorage on input, ctx + sliding-window selects expose the right
+options, the gear is tappable on mobile, zero overflow, zero console
+errors.
+
+No backend changes — MCP wire format, REST API, SQLite schema, embedding
+dimension, and CLI flags are all unchanged from `v1.0.0`.
+
 ## v1.0.0 — 2026-05-01
 
 Stability declaration. Same code as `v0.3.5` (plus the post-tag fmt
