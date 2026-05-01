@@ -10,14 +10,13 @@
   }
   let { message }: Props = $props();
 
-  // Inline markdown for assistant text. Disable HTML to keep it XSS-safe.
-  const renderer = (() => {
-    const r = new marked.Renderer();
-    return r;
-  })();
+  // Markdown for assistant text. `breaks: true` so single newlines render
+  // as line breaks (chat-friendly); `gfm: true` for code fences and tables.
   marked.setOptions({ breaks: true, gfm: true });
 
-  let body = $derived(message.role === 'assistant' ? marked.parse(message.content) : null);
+  let body = $derived(
+    message.role === 'assistant' ? (marked.parse(message.content) as string) : null
+  );
 </script>
 
 <div class="message {message.role}">

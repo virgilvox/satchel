@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import Modal from '../components/Modal.svelte';
   import StatusLine from '../components/StatusLine.svelte';
@@ -70,7 +71,17 @@
     else { path = e.path; bOpen = false; }
   }
 
-  $effect(() => { refreshJobs(); });
+  // Poll jobs while this view is mounted; clear the interval on unmount so
+  // we don't leak a 1.5s tick after the user navigates to another tab.
+  onMount(() => {
+    refreshJobs();
+    return () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = undefined;
+      }
+    };
+  });
 
   function fmtNum(n: number | undefined) { return (n ?? 0).toLocaleString(); }
   function fmtTime(iso?: string) {

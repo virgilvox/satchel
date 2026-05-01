@@ -89,7 +89,10 @@ pub fn ingest(
             .date()
             .map(|d| d.to_rfc3339().chars().take(16).collect::<String>())
             .unwrap_or_default();
-        let mut text = parsed.body_text(0).map(|s| s.into_owned()).unwrap_or_default();
+        let mut text = parsed
+            .body_text(0)
+            .map(|s| s.into_owned())
+            .unwrap_or_default();
         if text.trim().is_empty() {
             // Fall back to HTML body stripped of tags.
             if let Some(html) = parsed.body_html(0) {
@@ -101,7 +104,10 @@ pub fn ingest(
             .and_then(|h| h.as_text())
             .unwrap_or("")
             .to_string();
-        let id = parsed.message_id().unwrap_or(&format!("mbox-{i}")).to_string();
+        let id = parsed
+            .message_id()
+            .unwrap_or(&format!("mbox-{i}"))
+            .to_string();
 
         let header = format!(
             "[{date}] From: {from}{}\nSubject: {subject}{}\n",
@@ -184,8 +190,11 @@ mod tests {
     fn detects_mbox_extension() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("mail.mbox");
-        std::fs::write(&p, b"From a@b.com Mon Jan 1 00:00:00 2024\nFrom: a\nSubject: t\n\nbody")
-            .unwrap();
+        std::fs::write(
+            &p,
+            b"From a@b.com Mon Jan 1 00:00:00 2024\nFrom: a\nSubject: t\n\nbody",
+        )
+        .unwrap();
         assert!(detect(&p));
     }
 

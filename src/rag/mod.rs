@@ -424,9 +424,8 @@ impl Database {
         };
 
         // Total: count of distinct source_paths after WHERE.
-        let total_sql = format!(
-            "SELECT COUNT(DISTINCT d.source_path) FROM documents d {where_clause}"
-        );
+        let total_sql =
+            format!("SELECT COUNT(DISTINCT d.source_path) FROM documents d {where_clause}");
         // Build the param list. Note that `filter_type: Option<&str>` borrows
         // for the function lifetime, so casting through a String avoids the
         // "doesn't live long enough" trap when passing &dyn ToSql later.
@@ -466,15 +465,18 @@ impl Database {
 
         let mut stmt = conn.prepare(&page_sql)?;
         let sources: Vec<SourceInfo> = stmt
-            .query_map(rusqlite::params_from_iter(all_params.iter().copied()), |row| {
-                Ok(SourceInfo {
-                    path: row.get(0)?,
-                    file_type: row.get(1)?,
-                    record_count: row.get::<_, i64>(2)? as usize,
-                    chunk_count: row.get::<_, i64>(3)? as usize,
-                    ingested_at: row.get(4)?,
-                })
-            })?
+            .query_map(
+                rusqlite::params_from_iter(all_params.iter().copied()),
+                |row| {
+                    Ok(SourceInfo {
+                        path: row.get(0)?,
+                        file_type: row.get(1)?,
+                        record_count: row.get::<_, i64>(2)? as usize,
+                        chunk_count: row.get::<_, i64>(3)? as usize,
+                        ingested_at: row.get(4)?,
+                    })
+                },
+            )?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -617,11 +619,7 @@ impl Database {
     /// Delete documents whose `source_path` or `id` is exactly `path`.
     /// Returns `(deleted_documents, deleted_chunks)`. Wildcard chars (`%`,
     /// `_`) in `path` are treated as literals — this is `=`, not `LIKE`.
-    pub fn delete_by_path_exact(
-        &self,
-        path: &str,
-        dry_run: bool,
-    ) -> Result<(usize, usize)> {
+    pub fn delete_by_path_exact(&self, path: &str, dry_run: bool) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
             conn.prepare("SELECT id FROM documents WHERE source_path = ?1 OR id = ?1")?;
@@ -641,16 +639,11 @@ impl Database {
     /// Delete documents whose `source_path` starts with `prefix`. Underscores
     /// and percent signs in `prefix` are escaped — they match literally, not
     /// as SQL wildcards.
-    pub fn delete_by_path_prefix(
-        &self,
-        prefix: &str,
-        dry_run: bool,
-    ) -> Result<(usize, usize)> {
+    pub fn delete_by_path_prefix(&self, prefix: &str, dry_run: bool) -> Result<(usize, usize)> {
         let pattern = format!("{}%", escape_like(prefix));
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            r"SELECT id FROM documents WHERE source_path LIKE ?1 ESCAPE '\'",
-        )?;
+        let mut stmt =
+            conn.prepare(r"SELECT id FROM documents WHERE source_path LIKE ?1 ESCAPE '\'")?;
         let doc_ids: Vec<String> = stmt
             .query_map(params![pattern], |r| r.get::<_, String>(0))?
             .filter_map(|r| r.ok())
@@ -665,14 +658,9 @@ impl Database {
     }
 
     /// Delete all documents of a given file_type (e.g., "json", "pdf").
-    pub fn delete_by_file_type(
-        &self,
-        file_type: &str,
-        dry_run: bool,
-    ) -> Result<(usize, usize)> {
+    pub fn delete_by_file_type(&self, file_type: &str, dry_run: bool) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT id FROM documents WHERE file_type = ?1")?;
+        let mut stmt = conn.prepare("SELECT id FROM documents WHERE file_type = ?1")?;
         let doc_ids: Vec<String> = stmt
             .query_map(params![file_type], |r| r.get::<_, String>(0))?
             .filter_map(|r| r.ok())
@@ -689,10 +677,8 @@ impl Database {
     /// Wipe everything: documents, chunks, tags. Schema (and FTS index) remain.
     pub fn clear_all(&self, dry_run: bool) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
-        let doc_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
-        let chunk_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        let doc_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+        let chunk_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         if dry_run {
             return Ok((doc_count as usize, chunk_count as usize));
         }
@@ -733,9 +719,7 @@ fn count_chunks_for_docs(conn: &Connection, doc_ids: &[String]) -> Result<usize>
         return Ok(0);
     }
     let placeholders = vec!["?"; doc_ids.len()].join(",");
-    let sql = format!(
-        "SELECT COUNT(*) FROM chunks WHERE document_id IN ({placeholders})"
-    );
+    let sql = format!("SELECT COUNT(*) FROM chunks WHERE document_id IN ({placeholders})");
     let params: Vec<&dyn rusqlite::ToSql> =
         doc_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let count: i64 = conn.query_row(&sql, params.as_slice(), |r| r.get(0))?;
@@ -1050,9 +1034,7 @@ mod tests {
         assert_eq!(all.sources.len(), 2);
         assert_eq!(all.total, 2);
 
-        let md_only = db
-            .list_sources(Some("md"), None, "name", 100, 0)
-            .unwrap();
+        let md_only = db.list_sources(Some("md"), None, "name", 100, 0).unwrap();
         assert_eq!(md_only.sources.len(), 1);
         assert_eq!(md_only.sources[0].file_type, "md");
 
@@ -1204,8 +1186,15 @@ mod tests {
         let query_emb = vec![1.0, 0.0, 0.0];
         for i in 0..30 {
             let id = format!("d{i}");
-            db.insert_document(&id, &format!("/doc{i}.md"), "md", None, "x", &format!("h{i}"))
-                .unwrap();
+            db.insert_document(
+                &id,
+                &format!("/doc{i}.md"),
+                "md",
+                None,
+                "x",
+                &format!("h{i}"),
+            )
+            .unwrap();
             db.insert_chunk(
                 &format!("c{i}"),
                 &id,
@@ -1240,8 +1229,15 @@ mod tests {
         let emb = vec![1.0, 0.0];
         for i in 0..15 {
             let id = format!("d{i}");
-            db.insert_document(&id, &format!("/x/{i}.md"), "md", None, "x", &format!("h{i}"))
-                .unwrap();
+            db.insert_document(
+                &id,
+                &format!("/x/{i}.md"),
+                "md",
+                None,
+                "x",
+                &format!("h{i}"),
+            )
+            .unwrap();
             db.insert_chunk(
                 &format!("c{i}"),
                 &id,
@@ -1290,8 +1286,15 @@ mod tests {
 
         for i in 0..200 {
             let id = format!("n{i}");
-            db.insert_document(&id, &format!("/noise/{i}.md"), "md", None, "x", &format!("h{i}"))
-                .unwrap();
+            db.insert_document(
+                &id,
+                &format!("/noise/{i}.md"),
+                "md",
+                None,
+                "x",
+                &format!("h{i}"),
+            )
+            .unwrap();
             db.insert_chunk(
                 &format!("nc{i}"),
                 &id,
@@ -1361,10 +1364,24 @@ mod tests {
     #[test]
     fn test_delete_by_path_prefix() {
         let db = Database::open_memory().unwrap();
-        db.insert_document("d1", "/slack/general/2024-01-01.json", "json", None, "a", "h1")
-            .unwrap();
-        db.insert_document("d2", "/slack/general/2024-01-02.json", "json", None, "b", "h2")
-            .unwrap();
+        db.insert_document(
+            "d1",
+            "/slack/general/2024-01-01.json",
+            "json",
+            None,
+            "a",
+            "h1",
+        )
+        .unwrap();
+        db.insert_document(
+            "d2",
+            "/slack/general/2024-01-02.json",
+            "json",
+            None,
+            "b",
+            "h2",
+        )
+        .unwrap();
         db.insert_document("d3", "/notes/keep.md", "md", None, "c", "h3")
             .unwrap();
         db.insert_chunk("c1", "d1", 0, "x", 1, 0, 1, &[1.0, 0.0])
@@ -1376,7 +1393,11 @@ mod tests {
 
         let (d, c) = db.delete_by_path_prefix("/slack/general/", true).unwrap();
         assert_eq!((d, c), (2, 2));
-        assert_eq!(db.stats().unwrap().document_count, 3, "dry_run must not delete");
+        assert_eq!(
+            db.stats().unwrap().document_count,
+            3,
+            "dry_run must not delete"
+        );
 
         let (d, c) = db.delete_by_path_prefix("/slack/general/", false).unwrap();
         assert_eq!((d, c), (2, 2));
@@ -1588,7 +1609,9 @@ mod tests {
     #[test]
     fn test_list_records_by_source_unknown_source_empty() {
         let db = Database::open_memory().unwrap();
-        let (records, total) = db.list_records_by_source("/does/not/exist", 100, 0).unwrap();
+        let (records, total) = db
+            .list_records_by_source("/does/not/exist", 100, 0)
+            .unwrap();
         assert!(records.is_empty());
         assert_eq!(total, 0);
     }
@@ -1622,17 +1645,8 @@ mod tests {
             let id = format!("d{i}");
             db.insert_document(&id, path, "slack", None, "x", &format!("h{i}"))
                 .unwrap();
-            db.insert_chunk(
-                &format!("c{i}"),
-                &id,
-                0,
-                "msg",
-                1,
-                0,
-                3,
-                &[1.0, 0.0],
-            )
-            .unwrap();
+            db.insert_chunk(&format!("c{i}"), &id, 0, "msg", 1, 0, 3, &[1.0, 0.0])
+                .unwrap();
         }
         let page = db.list_sources(None, None, "name", 100, 0).unwrap();
         assert_eq!(page.sources.len(), 1, "should group 50 docs into 1 row");

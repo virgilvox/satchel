@@ -79,6 +79,9 @@ export interface InitProgress {
 export interface EngineHandle {
   modelId: string;
   unload: () => Promise<void>;
+  /** Best-effort cancel of an in-flight chat. Stops new tokens from arriving;
+   *  the for-await loop also bails out on the first AbortSignal tick. */
+  interrupt: () => void;
   chat: (
     messages: WebLLMMessage[],
     opts: ChatOpts
@@ -150,6 +153,9 @@ export async function createEngine(
     modelId,
     unload: async () => {
       await engine.unload();
+    },
+    interrupt: () => {
+      try { engine.interruptGenerate(); } catch { /* engine may not be generating */ }
     },
     chat: async (messages, opts) => {
       const stream = await engine.chat.completions.create({

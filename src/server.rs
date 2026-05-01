@@ -38,10 +38,7 @@ pub fn build_router(db: Database, embedder: Embedder) -> Router {
         .route("/", get(ui_handler))
         .route("/mcp", post(mcp_handler))
         .route("/api/status", get(api_status))
-        .route(
-            "/api/sources",
-            get(api_sources).delete(api_delete_sources),
-        )
+        .route("/api/sources", get(api_sources).delete(api_delete_sources))
         .route("/api/search", post(api_search))
         .route("/api/document", get(api_document))
         .route("/api/tags", get(api_tags))
@@ -399,7 +396,8 @@ async fn api_browse(Query(q): Query<BrowseQuery>) -> Json<Value> {
         let na = a["name"].as_str().unwrap_or("");
         let nb = b["name"].as_str().unwrap_or("");
         // Directories first, then alphabetical.
-        kb.cmp(ka).then_with(|| na.to_lowercase().cmp(&nb.to_lowercase()))
+        kb.cmp(ka)
+            .then_with(|| na.to_lowercase().cmp(&nb.to_lowercase()))
     });
 
     let parent = canonical.parent().map(|p| p.to_string_lossy().to_string());

@@ -26,9 +26,7 @@ use crate::ingest::progress::Progress;
 use crate::rag::Database;
 
 pub fn detect(path: &Path) -> bool {
-    path.is_dir()
-        && path.join("users.json").is_file()
-        && path.join("channels.json").is_file()
+    path.is_dir() && path.join("users.json").is_file() && path.join("channels.json").is_file()
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +56,7 @@ struct SlackChannel {
 }
 
 struct UserInfo {
-    handle: String,        // @name (preferred Slack username)
+    handle: String,          // @name (preferred Slack username)
     display: Option<String>, // "Real Name" if non-empty
 }
 
@@ -151,7 +149,11 @@ fn load_users(path: &Path) -> Result<HashMap<String, UserInfo>> {
             .unwrap_or_else(|| u.id.clone());
         let display = u
             .real_name
-            .or_else(|| u.profile.as_ref().and_then(|p| p.real_name_normalized.clone()))
+            .or_else(|| {
+                u.profile
+                    .as_ref()
+                    .and_then(|p| p.real_name_normalized.clone())
+            })
             .filter(|s| !s.is_empty() && Some(s) != Some(&handle));
         map.insert(u.id.clone(), UserInfo { handle, display });
     }
@@ -243,7 +245,10 @@ fn process_day(
                 })
                 .collect();
             replies.sort_by_key(|r| {
-                r.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                r.get("ts")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
             });
             for r in replies {
                 if !is_renderable(r) {
@@ -383,7 +388,10 @@ fn render_message_with_body(
     let (handle, display) = match users.get(user_id) {
         Some(u) => (
             format!("@{}", u.handle),
-            u.display.clone().map(|d| format!(" ({d})")).unwrap_or_default(),
+            u.display
+                .clone()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default(),
         ),
         None => {
             let fallback = m

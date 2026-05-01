@@ -22,8 +22,7 @@ pub fn detect(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if !(name == "_chat.txt"
-        || (name.starts_with("whatsapp chat with ") && name.ends_with(".txt")))
+    if !(name == "_chat.txt" || (name.starts_with("whatsapp chat with ") && name.ends_with(".txt")))
     {
         return false;
     }
@@ -34,7 +33,9 @@ pub fn detect(path: &Path) -> bool {
     };
     let head = std::str::from_utf8(&bytes[..bytes.len().min(2048)]).unwrap_or("");
     head.lines().any(|l| {
-        let l = l.trim_start_matches('\u{feff}').trim_start_matches('\u{200e}');
+        let l = l
+            .trim_start_matches('\u{feff}')
+            .trim_start_matches('\u{200e}');
         // iOS:    [31/12/22, 15:02:13] Bob: ...
         // Android: 31/12/2022, 15:02 - Bob: ...
         l.starts_with('[') || l.split_once(" - ").is_some()
@@ -73,7 +74,10 @@ pub fn ingest(
 
     let fmt = pick_date_format(text).unwrap_or("%d/%m/%y, %H:%M");
     let messages = parse_messages(text, fmt);
-    eprintln!("[satchel] WhatsApp '{chat_name}': {} messages", messages.len());
+    eprintln!(
+        "[satchel] WhatsApp '{chat_name}': {} messages",
+        messages.len()
+    );
 
     let source = path.to_string_lossy().to_string();
     let mut stats = ArchiveStats::default();

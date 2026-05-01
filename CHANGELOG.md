@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 — 2026-05-01
 
 ### Web UI · Svelte 5 + Vite framework
 

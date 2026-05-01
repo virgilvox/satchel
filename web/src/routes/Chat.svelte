@@ -87,6 +87,10 @@
     setTimeout(() => stream?.scrollTo({ top: stream.scrollHeight, behavior: 'smooth' }));
   }
 
+  // Hard cap on tool-call rounds per user turn so a misbehaving model can't
+  // pin the UI in an endless dispatch loop.
+  const MAX_TOOL_ROUNDS = 6;
+
   async function send(text: string) {
     if (busy || !engine) return;
     busy = true;
@@ -96,7 +100,7 @@
     scrollToBottom();
 
     try {
-      await runTurn();
+      await runTurn(0);
     } catch (e) {
       transcript = [
         ...transcript,
@@ -110,11 +114,23 @@
 
   function cancel() {
     abort?.abort();
+    engine?.interrupt();
     busy = false;
   }
 
-  async function runTurn(): Promise<void> {
+  async function runTurn(round: number): Promise<void> {
     if (!engine) return;
+    if (round >= MAX_TOOL_ROUNDS) {
+      transcript = [
+        ...transcript,
+        {
+          id: crypto.randomUUID(),
+          role: 'error',
+          content: `tool call loop exceeded ${MAX_TOOL_ROUNDS} rounds; stopping.`,
+        },
+      ];
+      return;
+    }
     const aId = crypto.randomUUID();
     transcript = [
       ...transcript,
@@ -168,7 +184,7 @@
       }
       scrollToBottom();
       // Loop back: feed tool results to the model and let it continue.
-      await runTurn();
+      await runTurn(round + 1);
     }
   }
 

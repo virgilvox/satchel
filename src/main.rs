@@ -64,7 +64,9 @@ fn platform_data_dir() -> Option<PathBuf> {
 /// Print a hint when a plausibly-prior vault exists somewhere other than the
 /// chosen location, so users coming from older defaults don't lose track of it.
 fn maybe_warn_legacy_vaults(chosen: &Path) {
-    let chosen_canon = chosen.canonicalize().unwrap_or_else(|_| chosen.to_path_buf());
+    let chosen_canon = chosen
+        .canonicalize()
+        .unwrap_or_else(|_| chosen.to_path_buf());
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("vault"));
@@ -306,9 +308,7 @@ async fn main() -> Result<()> {
                 (Some(p), None, None) => Mode::Exact(p),
                 (None, Some(pre), None) => Mode::Prefix(pre),
                 (None, None, Some(t)) => Mode::Type(t),
-                _ => anyhow::bail!(
-                    "Specify exactly one of: <path>, --prefix <p>, --type <ext>"
-                ),
+                _ => anyhow::bail!("Specify exactly one of: <path>, --prefix <p>, --type <ext>"),
             };
 
             let do_op = |dry: bool| -> Result<(usize, usize)> {

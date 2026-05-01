@@ -89,7 +89,11 @@ pub fn ingest(
         let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
         let author = m
             .get("author")
-            .and_then(|a| a.get("nickname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+            .and_then(|a| {
+                a.get("nickname")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
             .or_else(|| {
                 m.get("author")
                     .and_then(|a| a.get("name"))
@@ -98,9 +102,7 @@ pub fn ingest(
             .unwrap_or("");
 
         let date = ts.get(..16).unwrap_or(ts).replace('T', " ");
-        let mut body = format!(
-            "[{date} {guild_name}/#{channel_name} @{author}]: {content}"
-        );
+        let mut body = format!("[{date} {guild_name}/#{channel_name} @{author}]: {content}");
 
         // Embeds often carry the actual high-value text (link previews, quoted
         // articles). Attach as nested context.

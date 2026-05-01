@@ -25,8 +25,7 @@ mod embedded {
         include_bytes!("../../vault/models/bge-small-en-v1.5/model.safetensors");
     pub const TOKENIZER: &[u8] =
         include_bytes!("../../vault/models/bge-small-en-v1.5/tokenizer.json");
-    pub const CONFIG: &[u8] =
-        include_bytes!("../../vault/models/bge-small-en-v1.5/config.json");
+    pub const CONFIG: &[u8] = include_bytes!("../../vault/models/bge-small-en-v1.5/config.json");
 }
 
 /// How to collapse the per-token hidden states into a single embedding.
@@ -424,8 +423,17 @@ mod tests {
 
     #[test]
     fn test_pooling_for_model() {
-        assert!(matches!(Pooling::for_model("bge-small-en-v1.5"), Pooling::Cls));
-        assert!(matches!(Pooling::for_model("snowflake-arctic-embed-s"), Pooling::Cls));
-        assert!(matches!(Pooling::for_model("all-MiniLM-L6-v2"), Pooling::Mean));
+        assert!(matches!(
+            Pooling::for_model("bge-small-en-v1.5"),
+            Pooling::Cls
+        ));
+        assert!(matches!(
+            Pooling::for_model("snowflake-arctic-embed-s"),
+            Pooling::Cls
+        ));
+        assert!(matches!(
+            Pooling::for_model("all-MiniLM-L6-v2"),
+            Pooling::Mean
+        ));
     }
 }

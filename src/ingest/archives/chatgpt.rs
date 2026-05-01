@@ -38,8 +38,14 @@ pub fn ingest(
     let source = convo_path.to_string_lossy().to_string();
 
     for c in &convos {
-        let title = c.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
-        let id = c.get("conversation_id").and_then(|v| v.as_str()).unwrap_or("");
+        let title = c
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Untitled");
+        let id = c
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let create_time = c.get("create_time").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
         let body = match render_conversation(c) {
@@ -155,10 +161,7 @@ fn extract_content_text(content: &Value) -> String {
                 .get("language")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let body = content
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let body = content.get("text").and_then(|v| v.as_str()).unwrap_or("");
             format!("```{lang}\n{body}\n```")
         }
         "multimodal_text" => content

@@ -8,7 +8,8 @@ permissions:
   contents: write
 
 env:
-  MODEL_URL: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main
+  MODEL_NAME: bge-small-en-v1.5
+  MODEL_URL: https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main
 
 jobs:
   build:
@@ -49,14 +50,26 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build web bundle
+        shell: bash
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build:fast
+
       - name: Download embedding model
         shell: bash
         run: |
-          mkdir -p vault/models/all-MiniLM-L6-v2
-          curl -sL -o vault/models/all-MiniLM-L6-v2/model.safetensors "$MODEL_URL/model.safetensors"
-          curl -sL -o vault/models/all-MiniLM-L6-v2/tokenizer.json "$MODEL_URL/tokenizer.json"
-          curl -sL -o vault/models/all-MiniLM-L6-v2/config.json "$MODEL_URL/config.json"
-          ls -lh vault/models/all-MiniLM-L6-v2/
+          mkdir -p "vault/models/${MODEL_NAME}"
+          curl -sL -o "vault/models/${MODEL_NAME}/model.safetensors" "$MODEL_URL/model.safetensors"
+          curl -sL -o "vault/models/${MODEL_NAME}/tokenizer.json" "$MODEL_URL/tokenizer.json"
+          curl -sL -o "vault/models/${MODEL_NAME}/config.json" "$MODEL_URL/config.json"
+          ls -lh "vault/models/${MODEL_NAME}/"
 
       - name: Install cross-compilation tools (aarch64 Linux)
         if: matrix.cross

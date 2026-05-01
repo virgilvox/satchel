@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import { api } from '../lib/api';
   import type { FileTypeStat, SourceRow } from '../lib/types';
@@ -42,7 +43,10 @@
     debounce = window.setTimeout(load, 250);
   }
 
-  $effect(() => {
+  // Mount-only init. User-driven changes route through the onchange / oninput
+  // handlers below so we keep the q-debounce and avoid double-fetches that a
+  // reactive $effect tracking q/type/sort would cause.
+  onMount(() => {
     load();
     loadTypes();
   });
