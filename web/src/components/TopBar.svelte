@@ -3,7 +3,7 @@
   import Dot from './Dot.svelte';
   import Pill from './Pill.svelte';
   import ModeToggle from './ModeToggle.svelte';
-  import { status } from '../lib/stores';
+  import { status } from '../lib/stores.svelte';
 
   let label = $derived.by(() => {
     if (!status.online) return 'OFFLINE';

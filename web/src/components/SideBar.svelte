@@ -1,6 +1,6 @@
 <script lang="ts">
   import Dot from './Dot.svelte';
-  import { router, status } from '../lib/stores';
+  import { router, status } from '../lib/stores.svelte';
   import type { Tab } from '../lib/types';
 
   interface Props {

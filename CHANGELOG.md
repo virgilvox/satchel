@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.1 — 2026-05-01
+
+### Hotfix
+
+- **Web UI was blank with `Uncaught ReferenceError: $state is not defined` in v0.3.0.** Svelte 5 runes only run through the compiler when they appear in `.svelte`, `.svelte.js`, or `.svelte.ts` files; the shared store module was named `lib/stores.ts`, so its `$state(...)` calls were left as literal references and the app crashed on first import. Renamed to `lib/stores.svelte.ts` and updated the five importers. svelte-check still passes (it only validates types, not the rune transform site).
+
 ## v0.3.0 — 2026-05-01
 
 ### Web UI · Svelte 5 + Vite framework

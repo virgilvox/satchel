@@ -16,7 +16,7 @@
     type InitProgress,
   } from '../lib/webllm';
   import { McpClient } from '../lib/mcp';
-  import { settings } from '../lib/stores';
+  import { settings } from '../lib/stores.svelte';
   import type { ChatMessage, McpTool, ToolCallResult } from '../lib/types';
 
   // ---- Model state ----

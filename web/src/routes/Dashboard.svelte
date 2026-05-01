@@ -4,7 +4,7 @@
   import ResultList from '../components/ResultList.svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import { api } from '../lib/api';
-  import { status } from '../lib/stores';
+  import { status } from '../lib/stores.svelte';
   import type { SearchResult } from '../lib/types';
 
   let q = $state('');

@@ -13,7 +13,7 @@
   import Manage from './routes/Manage.svelte';
   import Connect from './routes/Connect.svelte';
 
-  import { router, status } from './lib/stores';
+  import { router, status } from './lib/stores.svelte';
   import { api } from './lib/api';
 
   let activeJobs = $state(0);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { theme } from '../lib/stores';
+  import { theme } from '../lib/stores.svelte';
 </script>
 
 <button class="mode-toggle" type="button" title="Toggle theme" onclick={() => theme.toggle()}>
