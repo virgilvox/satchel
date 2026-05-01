@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Web UI redesign
+
+- New design system applied across the web UI: dark + light themes via CSS
+  custom properties (toggled with the topbar button, persisted in
+  `localStorage`, falls back to `prefers-color-scheme` on first load).
+  JetBrains Mono throughout. Punk/displaced notched-pin mark in the topbar
+  and Ask view, with an `feTurbulence` + `feDisplacementMap` filter so the
+  geometry stays hand-built.
+- New **Ask** tab: conversational entry point that wraps `search_knowledge`
+  in a chat-style transcript with tool-call cards, source attribution, and
+  truncated previews. No external LLM — pure retrieval.
+- All sections (Dashboard, Search, Documents, Ingest, Manage, Connect)
+  rebuilt around the design-system components: stat cards, tool cards,
+  pill statuses, message blocks, dashed section labels.
+- Active-job badge on the Ingest nav item.
+
+### Embedding model upgrade
+
+- Default embedding model is now [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5)
+  (33M params, 384-d, MTEB ~62 vs MiniLM-L6-v2's ~57). Same architecture and
+  dimension as the legacy model, so the SQLite schema is unchanged.
+- The loader still recognizes `all-MiniLM-L6-v2` and prefers whichever
+  single model is on disk. If both are present, BGE is preferred and a
+  warning is logged so users notice if their existing index was built under
+  the older model and would benefit from re-ingest.
+- Pooling strategy is selected per model: BGE/Snowflake/E5 use `[CLS]`
+  pooling; MiniLM-family models keep mean pooling.
+- `scripts/download-model.sh` now fetches BGE by default. Pass `legacy` to
+  fetch MiniLM instead.
+
 ## v0.2.2 — 2026-04-30
 
 Audit pass on v0.2.1.

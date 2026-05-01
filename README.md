@@ -149,7 +149,7 @@ cargo build --release --features embed-model
 
 ## How It Works
 
-SATCHEL generates 384-dimensional vector embeddings using [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), running locally via [candle](https://github.com/huggingface/candle) (pure Rust, zero C dependencies). Chunks and embeddings are stored in SQLite alongside an FTS5 keyword index. When your AI client asks a question, SATCHEL runs both retrievers in parallel and fuses ranks via RRF, then returns the top chunks as context.
+SATCHEL generates 384-dimensional vector embeddings using [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) (33M params, MTEB ~62), running locally via [candle](https://github.com/huggingface/candle) (pure Rust, zero C dependencies). The older [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) model is still recognized for backward compatibility — pass `legacy` to `scripts/download-model.sh` to fetch it. Chunks and embeddings are stored in SQLite alongside an FTS5 keyword index. When your AI client asks a question, SATCHEL runs both retrievers in parallel and fuses ranks via RRF, then returns the top chunks as context.
 
 For structured archives (Slack, ChatGPT, etc.), each logical message/conversation becomes one chunk with a normalized header line — names and dates show up verbatim in BM25 instead of being buried inside opaque JSON.
 

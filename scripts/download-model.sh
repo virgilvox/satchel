@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 # Download the embedding model for offline use.
 # Run this once on a machine with internet access.
+#
+# Default model: BAAI/bge-small-en-v1.5 (33M params, 384-d, MTEB ~62).
+# Pass `legacy` as the first argument to fetch the older
+# sentence-transformers/all-MiniLM-L6-v2 (22M params, 384-d, MTEB ~57)
+# instead — useful for vaults already indexed under the old model.
 
 set -euo pipefail
 
+MODE="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODEL_DIR="${SCRIPT_DIR}/../vault/models/all-MiniLM-L6-v2"
 
+if [ "$MODE" = "legacy" ]; then
+    MODEL_NAME="all-MiniLM-L6-v2"
+    BASE_URL="https://huggingface.co/sentence-transformers/${MODEL_NAME}/resolve/main"
+else
+    MODEL_NAME="bge-small-en-v1.5"
+    BASE_URL="https://huggingface.co/BAAI/${MODEL_NAME}/resolve/main"
+fi
+
+MODEL_DIR="${SCRIPT_DIR}/../vault/models/${MODEL_NAME}"
 mkdir -p "${MODEL_DIR}"
 
-echo "[satchel] Downloading all-MiniLM-L6-v2 model..."
-
-BASE_URL="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
+echo "[satchel] Downloading ${MODEL_NAME}..."
 
 for FILE in tokenizer.json config.json model.safetensors; do
     if [ ! -f "${MODEL_DIR}/${FILE}" ]; then

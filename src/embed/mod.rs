@@ -5,15 +5,53 @@ use candle_transformers::models::bert::{BertModel, Config};
 use std::path::Path;
 use std::sync::Mutex;
 
-// When built with embed-model, the model files are baked into the binary.
-// This eliminates the need for a separate model download step.
+// ─────────────────────────────────────────────────────────────────────────────
+// Model registry
+//
+// Default: BAAI/bge-small-en-v1.5 — 33M params, 384-d, MTEB ~62 (~5pt above
+// MiniLM-L6-v2). Same BERT architecture, same dim, candle-supported.
+//
+// Fallback: sentence-transformers/all-MiniLM-L6-v2 — 22M params, 384-d.
+// Older but still loadable; kept so vaults that already pulled MiniLM keep
+// working without forcing a re-index.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PRIMARY_MODEL: &str = "bge-small-en-v1.5";
+const FALLBACK_MODEL: &str = "all-MiniLM-L6-v2";
+
 #[cfg(feature = "embed-model")]
 mod embedded {
     pub const MODEL: &[u8] =
-        include_bytes!("../../vault/models/all-MiniLM-L6-v2/model.safetensors");
+        include_bytes!("../../vault/models/bge-small-en-v1.5/model.safetensors");
     pub const TOKENIZER: &[u8] =
-        include_bytes!("../../vault/models/all-MiniLM-L6-v2/tokenizer.json");
-    pub const CONFIG: &[u8] = include_bytes!("../../vault/models/all-MiniLM-L6-v2/config.json");
+        include_bytes!("../../vault/models/bge-small-en-v1.5/tokenizer.json");
+    pub const CONFIG: &[u8] =
+        include_bytes!("../../vault/models/bge-small-en-v1.5/config.json");
+}
+
+/// How to collapse the per-token hidden states into a single embedding.
+#[derive(Clone, Copy)]
+enum Pooling {
+    /// Average non-padding tokens. Default for `all-MiniLM-L6-v2`.
+    Mean,
+    /// Take the [CLS] token's hidden state. Default for the BGE family —
+    /// using mean pooling for BGE drops retrieval quality noticeably.
+    Cls,
+}
+
+impl Pooling {
+    fn for_model(name: &str) -> Self {
+        // BGE / Snowflake Arctic / e5 all expect CLS pooling.
+        if name.starts_with("bge-")
+            || name.starts_with("snowflake-arctic")
+            || name.starts_with("multilingual-e5")
+            || name.starts_with("e5-")
+        {
+            Pooling::Cls
+        } else {
+            Pooling::Mean
+        }
+    }
 }
 
 pub struct Embedder {
@@ -27,6 +65,8 @@ enum EmbedderInner {
         tokenizer: tokenizers::Tokenizer,
         dims: usize,
         device: Device,
+        name: String,
+        pooling: Pooling,
     },
     Unavailable {
         dims: usize,
@@ -45,31 +85,58 @@ pub struct EmbeddingResult {
 
 impl Embedder {
     pub fn load(vault_path: &Path) -> Result<Self> {
-        // Try loading from disk first (allows overriding the embedded model)
-        let model_dir = vault_path.join("models").join("all-MiniLM-L6-v2");
-        let model_path = model_dir.join("model.safetensors");
-        let tokenizer_path = model_dir.join("tokenizer.json");
-        let config_path = model_dir.join("config.json");
+        let models_root = vault_path.join("models");
 
-        if model_path.exists() && tokenizer_path.exists() && config_path.exists() {
-            match Self::load_from_files(&model_path, &tokenizer_path, &config_path) {
-                Ok(embedder) => {
-                    tracing::info!("Loaded embedding model from disk: all-MiniLM-L6-v2");
-                    return Ok(embedder);
+        // Probe disk in preference order. Either lives at
+        // `<vault>/models/<name>/{model.safetensors,tokenizer.json,config.json}`.
+        let on_disk: Vec<&str> = [PRIMARY_MODEL, FALLBACK_MODEL]
+            .into_iter()
+            .filter(|name| {
+                let dir = models_root.join(name);
+                dir.join("model.safetensors").exists()
+                    && dir.join("tokenizer.json").exists()
+                    && dir.join("config.json").exists()
+            })
+            .collect();
+
+        if on_disk.len() > 1 {
+            tracing::warn!(
+                "Multiple embedding models on disk ({:?}); preferring '{}'. \
+                 If your DB was indexed with a different model, results will be \
+                 inaccurate — re-ingest after removing the unused model directory.",
+                on_disk,
+                on_disk[0]
+            );
+        }
+
+        for name in on_disk {
+            let dir = models_root.join(name);
+            let model_path = dir.join("model.safetensors");
+            let tokenizer_path = dir.join("tokenizer.json");
+            let config_path = dir.join("config.json");
+            match Self::load_from_files(&model_path, &tokenizer_path, &config_path, name) {
+                Ok(emb) => {
+                    tracing::info!("Loaded embedding model from disk: {name}");
+                    return Ok(emb);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to load model from disk: {e}");
+                    tracing::warn!("Failed to load model {name} from disk: {e}");
                 }
             }
         }
 
-        // Fall back to embedded model (if compiled with embed-model feature)
+        // Bundled bytes (release builds with `--features embed-model`).
         #[cfg(feature = "embed-model")]
         {
-            match Self::load_from_bytes(embedded::MODEL, embedded::TOKENIZER, embedded::CONFIG) {
-                Ok(embedder) => {
-                    tracing::info!("Loaded embedded model: all-MiniLM-L6-v2");
-                    return Ok(embedder);
+            match Self::load_from_bytes(
+                embedded::MODEL,
+                embedded::TOKENIZER,
+                embedded::CONFIG,
+                PRIMARY_MODEL,
+            ) {
+                Ok(emb) => {
+                    tracing::info!("Loaded embedded model: {PRIMARY_MODEL}");
+                    return Ok(emb);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load embedded model: {e}");
@@ -78,7 +145,8 @@ impl Embedder {
         }
 
         tracing::warn!(
-            "No embedding model available. Run ./scripts/download-model.sh or build with --features embed-model"
+            "No embedding model available. Run ./scripts/download-model.sh \
+             or build with --features embed-model"
         );
         Ok(Embedder {
             inner: EmbedderInner::Unavailable { dims: 384 },
@@ -89,6 +157,7 @@ impl Embedder {
         model_path: &Path,
         tokenizer_path: &Path,
         config_path: &Path,
+        name: &str,
     ) -> Result<Self> {
         let device = Device::Cpu;
 
@@ -98,13 +167,13 @@ impl Embedder {
             serde_json::from_str(&config_str).context("Failed to parse config.json")?;
         let dims = config.hidden_size;
 
-        // SAFETY: The safetensors file is read-only and not modified while mapped.
+        // SAFETY: the safetensors file is read-only and not modified while mapped.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)
                 .context("Failed to load model weights")?
         };
 
-        let model = BertModel::load(vb, &config).context("Failed to build BERT model")?;
+        let model = build_bert(vb, &config)?;
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
 
@@ -114,6 +183,8 @@ impl Embedder {
                 tokenizer,
                 dims,
                 device,
+                name: name.to_string(),
+                pooling: Pooling::for_model(name),
             },
         })
     }
@@ -123,6 +194,7 @@ impl Embedder {
         model_bytes: &[u8],
         tokenizer_bytes: &[u8],
         config_bytes: &[u8],
+        name: &str,
     ) -> Result<Self> {
         let device = Device::Cpu;
 
@@ -133,7 +205,7 @@ impl Embedder {
         let vb = VarBuilder::from_buffered_safetensors(model_bytes.to_vec(), DType::F32, &device)
             .context("Failed to load embedded model weights")?;
 
-        let model = BertModel::load(vb, &config).context("Failed to build BERT model")?;
+        let model = build_bert(vb, &config)?;
         let tokenizer = tokenizers::Tokenizer::from_bytes(tokenizer_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to load embedded tokenizer: {e}"))?;
 
@@ -143,6 +215,8 @@ impl Embedder {
                 tokenizer,
                 dims,
                 device,
+                name: name.to_string(),
+                pooling: Pooling::for_model(name),
             },
         })
     }
@@ -158,9 +232,11 @@ impl Embedder {
                 tokenizer,
                 dims,
                 device,
+                pooling,
+                ..
             } => {
                 let mut model = model.lock().unwrap();
-                Self::run_inference(&mut model, tokenizer, *dims, device, text)
+                Self::run_inference(&mut model, tokenizer, *dims, device, *pooling, text)
             }
             EmbedderInner::Unavailable { .. } => {
                 anyhow::bail!(
@@ -194,8 +270,9 @@ impl Embedder {
     fn run_inference(
         model: &mut BertModel,
         tokenizer: &tokenizers::Tokenizer,
-        dims: usize,
+        _dims: usize,
         device: &Device,
+        pooling: Pooling,
         text: &str,
     ) -> Result<EmbeddingResult> {
         let encoding = tokenizer
@@ -213,15 +290,22 @@ impl Embedder {
 
         let output = model.forward(&input_ids_t, &token_type_ids_t, Some(&attention_mask_t))?;
 
-        let attention_f = attention_mask_t.to_dtype(DType::F32)?.unsqueeze(2)?;
-        let weighted = output.broadcast_mul(&attention_f)?;
-        let summed = weighted.sum(1)?;
-        let mask_sum = attention_f.sum(1)?;
-        let pooled = summed.broadcast_div(&mask_sum)?;
+        let pooled = match pooling {
+            Pooling::Mean => {
+                let attention_f = attention_mask_t.to_dtype(DType::F32)?.unsqueeze(2)?;
+                let weighted = output.broadcast_mul(&attention_f)?;
+                let summed = weighted.sum(1)?;
+                let mask_sum = attention_f.sum(1)?;
+                summed.broadcast_div(&mask_sum)?
+            }
+            Pooling::Cls => {
+                // [batch, seq, hidden] -> [batch, hidden] using token 0 ([CLS]).
+                output.i((.., 0))?
+            }
+        };
 
         let norm = pooled.sqr()?.sum(1)?.sqrt()?;
         let normalized = pooled.broadcast_div(&norm.unsqueeze(1)?)?;
-
         let embedding: Vec<f32> = normalized.squeeze(0)?.to_vec1()?;
 
         Ok(EmbeddingResult {
@@ -252,7 +336,35 @@ impl Embedder {
     }
 
     pub fn model_name(&self) -> &str {
-        "all-MiniLM-L6-v2"
+        match &self.inner {
+            EmbedderInner::Candle { name, .. } => name.as_str(),
+            #[cfg(feature = "test-support")]
+            EmbedderInner::Fixed { .. } => PRIMARY_MODEL,
+            _ => PRIMARY_MODEL,
+        }
+    }
+}
+
+// `IndexOp` brings `.i((..., 0))` slicing into scope.
+use candle_core::IndexOp;
+
+/// Try loading a `BertModel` directly first, then with a `bert.` prefix.
+/// `BAAI/bge-*` ships with no prefix (saved as `BertModel`), but some
+/// derivatives keep the `bert.` namespace from `BertForXxx` checkpoints.
+fn build_bert(vb: VarBuilder, config: &Config) -> Result<BertModel> {
+    match BertModel::load(vb.clone(), config) {
+        Ok(m) => Ok(m),
+        Err(first) => {
+            // Retry under the "bert" submodule. The error from BertModel::load
+            // when keys are missing is verbose; surface the original message
+            // only if both attempts fail so the user gets the meaningful one.
+            match BertModel::load(vb.pp("bert"), config) {
+                Ok(m) => Ok(m),
+                Err(_) => Err(anyhow::anyhow!(
+                    "Failed to load BERT weights (no prefix and bert.* both rejected): {first}"
+                )),
+            }
+        }
     }
 }
 
@@ -290,7 +402,7 @@ mod tests {
     #[test]
     fn test_fixed_embedder_model_name() {
         let embedder = Embedder::fixed(384);
-        assert_eq!(embedder.model_name(), "all-MiniLM-L6-v2");
+        assert_eq!(embedder.model_name(), PRIMARY_MODEL);
     }
 
     #[test]
@@ -308,5 +420,12 @@ mod tests {
         for v in &results {
             assert_eq!(v.len(), 384);
         }
+    }
+
+    #[test]
+    fn test_pooling_for_model() {
+        assert!(matches!(Pooling::for_model("bge-small-en-v1.5"), Pooling::Cls));
+        assert!(matches!(Pooling::for_model("snowflake-arctic-embed-s"), Pooling::Cls));
+        assert!(matches!(Pooling::for_model("all-MiniLM-L6-v2"), Pooling::Mean));
     }
 }
