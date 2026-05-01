@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.0.0 — 2026-05-01
+
+Stability declaration. Same code as `v0.3.5` (plus the post-tag fmt
+fix on `main`), just declared stable. Everything that was broken in the
+0.3.x rapid-iteration cycle is fixed:
+
+- Web UI is a real Svelte 5 + Vite SPA with seven tabs (Dashboard,
+  Ask, Chat, Search, Documents, Ingest, Manage, Connect), bundled to
+  a single self-contained HTML and embedded into the Rust binary.
+- Default embedder is `BAAI/bge-small-en-v1.5` (384-d, MTEB ~62).
+  Loader still recognizes `all-MiniLM-L6-v2` for backward compat.
+  Long inputs (mbox emails, big PDFs) truncate cleanly to 512 tokens
+  instead of crashing the position-embedding lookup.
+- In-browser Chat runs WebLLM models entirely in WebGPU and drives
+  tool calling via constrained decoding (XGrammar logit mask on a
+  per-tool agent JSON-schema). Works with any model in the curated
+  list, not just WebLLM's Hermes whitelist.
+- Executable branding works the way each OS allows: Windows embeds
+  the icon directly in the `.exe`, macOS ships a `Satchel.app`
+  bundle (codesigned, packed with `ditto`), Linux ships a `.desktop`
+  file plus a hicolor PNG.
+- Theme tokens, the punk/displaced notched-pin mark, JetBrains Mono,
+  and dark/light mode persist through `localStorage` with
+  `prefers-color-scheme` fallback.
+- Mobile-first responsive layout — Playwright walk at 390 px viewport
+  reports zero overflow and zero console errors on every tab.
+
+No breaking changes from `v0.3.5`. The MCP wire format, REST API,
+SQLite schema, embedding dimension, and CLI flags are all preserved.
+
 ## v0.3.5 — 2026-05-01
 
 ### Icon actually shows on the executable (per-OS, the only way each OS allows)
