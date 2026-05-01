@@ -113,9 +113,12 @@
   }
 
   function cancel() {
+    // Signal abort + interrupt the engine; let send()'s finally clear `busy`
+    // after runTurn unwinds. Clearing busy here would race a fast follow-up
+    // send() against the still-resolving previous turn — two parallel
+    // runTurns would both manipulate transcript.
     abort?.abort();
     engine?.interrupt();
-    busy = false;
   }
 
   async function runTurn(round: number): Promise<void> {
@@ -147,12 +150,16 @@
       signal: abort?.signal,
       onDelta: (delta) => {
         streamed += delta;
-        // Strip a closing </think> and everything after for incremental render.
-        const m = /^<think>([\s\S]*?)<\/think>([\s\S]*)$/.exec(streamed);
+        // Render reasoning + content live. Tolerate leading whitespace
+        // before <think> — DeepSeek-distill etc. emit a newline first.
+        const m = /^\s*<think>([\s\S]*?)<\/think>([\s\S]*)$/.exec(streamed);
         const partial = m
           ? { reasoning: m[1].trim(), content: m[2].trimStart() }
-          : streamed.startsWith('<think>')
-            ? { reasoning: streamed.slice('<think>'.length), content: '' }
+          : /^\s*<think>/.test(streamed)
+            ? {
+                reasoning: streamed.replace(/^\s*<think>/, ''),
+                content: '',
+              }
             : { reasoning: undefined, content: streamed };
         transcript = transcript.map((m2) =>
           m2.id !== aId ? m2 : { ...m2, ...partial }

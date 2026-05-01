@@ -13,10 +13,15 @@
   // Jobs
   let jobs = $state<IngestJob[]>([]);
   let timer: number | undefined;
+  // Tracks whether this view is still alive. Async work that resolves after
+  // unmount must not schedule new intervals or write reactive state.
+  let alive = true;
 
   async function refreshJobs() {
+    if (!alive) return;
     try {
       const r = await api.jobs();
+      if (!alive) return;
       jobs = r.jobs ?? [];
       const active = jobs.some((j) => j.status === 'running' || j.status === 'pending');
       if (active && !timer) timer = window.setInterval(refreshJobs, 1500);
@@ -76,6 +81,7 @@
   onMount(() => {
     refreshJobs();
     return () => {
+      alive = false;
       if (timer) {
         clearInterval(timer);
         timer = undefined;

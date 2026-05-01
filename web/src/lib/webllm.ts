@@ -207,8 +207,10 @@ export async function createEngine(
       });
 
       // Pull <think>...</think> reasoning out of the assistant content.
+      // Tolerate leading whitespace before <think> — some models emit a
+      // newline first.
       let reasoning: string | undefined;
-      const m = /^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/.exec(content);
+      const m = /^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/.exec(content);
       let userContent = content;
       if (m) {
         reasoning = m[1].trim();

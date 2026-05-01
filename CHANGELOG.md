@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.2 — 2026-05-01
+
+### Audit fixes (caught by a Playwright walk-through of the rebuilt bundle)
+
+- **Chat: cancel/busy race.** `cancel()` set `busy = false` synchronously,
+  which left a window where the user could press Send before the
+  in-flight `runTurn` finished unwinding — two concurrent turns would
+  both manipulate the transcript. Now `cancel()` only signals abort and
+  calls `engine.interruptGenerate()`; `send()`'s `finally` block remains
+  the single source of truth for `busy`.
+- **Ingest: timer race after async unmount.** The poll could resolve and
+  schedule a new `setInterval` *after* the cleanup ran on tab switch,
+  leaking a 1.5s tick. Tracked an `alive` flag and check it on every
+  await-resume.
+- **Stores: localStorage in private/sandboxed contexts.** Wrapped
+  `localStorage.{get,set}Item` in try/catch and gave `prefers-color-scheme`
+  the same treatment so the whole module load can't crash on a hostile
+  storage API.
+- **Reasoning regex.** Tolerate leading whitespace/newline before the
+  opening `<think>` tag — DeepSeek-distill emits one — both at stream
+  time (live render) and post-stream (final extract).
+
 ## v0.3.1 — 2026-05-01
 
 ### Hotfix
