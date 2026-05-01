@@ -43,7 +43,11 @@
     {#if message.retrieval && message.retrieval.length > 0}
       <div class="retrieval">
         {#each message.retrieval as r, i (i)}
-          <ResultRow result={r} truncate={600} />
+          <!-- No truncate — ResultRow has its own scroll-clip via
+               max-height + overflow-y:auto, same as the Search tab.
+               Hard-truncating to 600 chars was ignoring half of every
+               long mbox email body. -->
+          <ResultRow result={r} />
         {/each}
       </div>
     {/if}
