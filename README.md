@@ -1,8 +1,11 @@
-# SATCHEL
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-horizontal-dark.svg">
+  <img alt="SATCHEL :: Host-Free Embedded Lookup" src="assets/brand/logo-horizontal-light.svg" width="580">
+</picture>
 
 **Self-contained Augmented Text Corpus for Host-free Embedded Lookup**
 
-Portable RAG on a stick. Download one file, run it, and your entire knowledge base is available as context in Claude, ChatGPT, Cursor, or any MCP-compatible client. No cloud. No API keys. No installation. Everything runs locally.
+Portable RAG on a stick. Download one file, run it, and your entire knowledge base is available as context in Claude, ChatGPT, Cursor, or any MCP-compatible client — or chat with it directly in the bundled in-browser LLM. No cloud. No API keys. No installation. Everything runs locally.
 
 ![Dashboard](assets/screenshots/01-dashboard.png)
 
@@ -93,11 +96,15 @@ Then in claude.ai → Settings → Connectors → Add Custom Connector, point it
 Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428):
 
 - **Dashboard** — vault stats, quick search.
-- **Documents** — browse ingested files.
+- **Ask** — conversational entry to the vault. Phrase a question and a tool-call card calls `search_knowledge` against the vault, returning the top passages inline with source attribution. Pure retrieval — no external LLM, no network roundtrip.
+- **Chat** — full in-browser LLM with tool calling against the local MCP server. Pick a small model (Qwen3, Llama 3.2 1B/3B, Phi-3.5 mini), it loads via WebGPU and caches in your browser, then chats over your vault using the same MCP tools (`search_knowledge`, `list_sources`, `get_document`, `list_tags`, `vault_stats`). Reasoning blocks render in a collapsible panel; tool calls render as teal-bordered cards inline with the assistant turn. Models that emit `<think>...</think>` are rendered with the reasoning isolated. *(Status: scaffolded; first model picker + WebLLM integration in progress — see [issues](https://github.com/virgilvox/satchel/issues) for the roadmap.)*
 - **Search** — full hybrid retrieval with score ranking.
+- **Documents** — browse ingested files.
 - **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. Multiple folders can run concurrently and progress is tracked live (files seen, records added/skipped/failed, current file, elapsed time).
 - **Manage** — delete documents by path prefix or file type, or wipe the vault.
 - **Connect** — config snippets for every supported AI client.
+
+The UI ships dark + light themes that follow the design system tokens. Toggle with the button in the topbar; choice persists in `localStorage` and falls back to `prefers-color-scheme` on first load.
 
 ## Supported File Types
 
