@@ -31,11 +31,17 @@ pub fn build_router(db: Database, embedder: Embedder) -> Router {
         .route("/", get(ui_handler))
         .route("/mcp", post(mcp_handler))
         .route("/api/status", get(api_status))
-        .route("/api/sources", get(api_sources))
+        .route(
+            "/api/sources",
+            get(api_sources).delete(api_delete_sources),
+        )
         .route("/api/search", post(api_search))
         .route("/api/document", get(api_document))
         .route("/api/tags", get(api_tags))
+        .route("/api/clear", post(api_clear))
         .route("/api/config/:client", get(api_config))
+        .route("/api/browse", get(api_browse))
+        .route("/api/ingest", post(api_ingest))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -144,10 +150,13 @@ async fn api_search(
         Err(e) => return Json(json!({ "error": e.to_string() })),
     };
 
-    match state
-        .db
-        .search(&query_embedding, top_k, req.filter_source.as_deref(), None)
-    {
+    match state.db.search(
+        &query_embedding,
+        &req.query,
+        top_k,
+        req.filter_source.as_deref(),
+        None,
+    ) {
         Ok(results) => Json(json!({ "results": results })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
@@ -177,6 +186,206 @@ async fn api_tags(State(state): State<Arc<AppState>>) -> Json<Value> {
             })).collect::<Vec<_>>()
         })),
         Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteRequest {
+    path: Option<String>,
+    prefix: Option<String>,
+    file_type: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn api_delete_sources(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeleteRequest>,
+) -> Json<Value> {
+    let result = match (req.path, req.prefix, req.file_type) {
+        (Some(p), None, None) => state.db.delete_by_path_exact(&p, req.dry_run),
+        (None, Some(pre), None) => state.db.delete_by_path_prefix(&pre, req.dry_run),
+        (None, None, Some(t)) => state.db.delete_by_file_type(&t, req.dry_run),
+        _ => {
+            return Json(json!({
+                "error": "specify exactly one of: path, prefix, file_type"
+            }))
+        }
+    };
+    match result {
+        Ok((docs, chunks)) => Json(json!({
+            "deleted_documents": docs,
+            "deleted_chunks": chunks,
+            "dry_run": req.dry_run,
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ClearRequest {
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn api_clear(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ClearRequest>,
+) -> Json<Value> {
+    if !req.dry_run && !req.confirm {
+        return Json(json!({
+            "error": "destructive operation: pass {\"confirm\": true} or {\"dry_run\": true}"
+        }));
+    }
+    match state.db.clear_all(req.dry_run) {
+        Ok((docs, chunks)) => Json(json!({
+            "deleted_documents": docs,
+            "deleted_chunks": chunks,
+            "dry_run": req.dry_run,
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    path: Option<String>,
+}
+
+async fn api_browse(Query(q): Query<BrowseQuery>) -> Json<Value> {
+    use std::path::PathBuf;
+    let start: PathBuf = match q.path.as_deref() {
+        Some(p) if !p.is_empty() => {
+            // Expand leading "~/" to home dir; otherwise treat as absolute.
+            if let Some(stripped) = p.strip_prefix("~/") {
+                match std::env::var_os("HOME") {
+                    Some(h) => PathBuf::from(h).join(stripped),
+                    None => return Json(json!({ "error": "HOME not set" })),
+                }
+            } else if p == "~" {
+                match std::env::var_os("HOME") {
+                    Some(h) => PathBuf::from(h),
+                    None => return Json(json!({ "error": "HOME not set" })),
+                }
+            } else {
+                PathBuf::from(p)
+            }
+        }
+        _ => match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h),
+            None => PathBuf::from("/"),
+        },
+    };
+
+    if !start.exists() {
+        return Json(json!({ "error": format!("not found: {}", start.display()) }));
+    }
+    let canonical = start.canonicalize().unwrap_or(start.clone());
+    let read = match std::fs::read_dir(&canonical) {
+        Ok(r) => r,
+        Err(e) => return Json(json!({ "error": format!("read_dir: {e}") })),
+    };
+    let mut entries: Vec<Value> = Vec::new();
+    for e in read.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        // Hide dotfiles by default — clutter for the user's home.
+        if name.starts_with('.') {
+            continue;
+        }
+        let kind = if p.is_dir() {
+            "dir"
+        } else if p.is_file() {
+            "file"
+        } else {
+            continue;
+        };
+        entries.push(json!({
+            "name": name,
+            "kind": kind,
+            "path": p.to_string_lossy(),
+        }));
+    }
+    entries.sort_by(|a, b| {
+        let ka = a["kind"].as_str().unwrap_or("");
+        let kb = b["kind"].as_str().unwrap_or("");
+        let na = a["name"].as_str().unwrap_or("");
+        let nb = b["name"].as_str().unwrap_or("");
+        // Directories first, then alphabetical.
+        kb.cmp(ka).then_with(|| na.to_lowercase().cmp(&nb.to_lowercase()))
+    });
+
+    let parent = canonical.parent().map(|p| p.to_string_lossy().to_string());
+
+    Json(json!({
+        "path": canonical.to_string_lossy(),
+        "parent": parent,
+        "entries": entries,
+    }))
+}
+
+#[derive(Deserialize)]
+struct IngestRequest {
+    path: String,
+    #[serde(default)]
+    chunk_size: Option<usize>,
+    #[serde(default)]
+    chunk_overlap: Option<usize>,
+}
+
+async fn api_ingest(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<IngestRequest>,
+) -> Json<Value> {
+    use std::path::PathBuf;
+    let raw = req.path.trim();
+    let path: PathBuf = if let Some(stripped) = raw.strip_prefix("~/") {
+        match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join(stripped),
+            None => return Json(json!({ "error": "HOME not set" })),
+        }
+    } else {
+        PathBuf::from(raw)
+    };
+
+    if !path.exists() {
+        return Json(json!({ "error": format!("not found: {}", path.display()) }));
+    }
+
+    let config = crate::ingest::IngestConfig {
+        chunk_size: req.chunk_size.unwrap_or(512),
+        chunk_overlap: req.chunk_overlap.unwrap_or(64),
+    };
+
+    // Run on a blocking thread — ingestion is sync I/O + CPU-bound embedding.
+    let db = state.db.clone();
+    let embedder = state.embedder.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::try_current().ok();
+        if let Some(handle) = rt {
+            handle.block_on(crate::ingest::ingest_path(&path, &db, &embedder, &config))
+        } else {
+            // Fallback: build a small runtime.
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(crate::ingest::ingest_path(&path, &db, &embedder, &config))
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => match state.db.stats() {
+            Ok(s) => Json(json!({
+                "status": "ok",
+                "documents": s.document_count,
+                "chunks": s.chunk_count,
+            })),
+            Err(e) => Json(json!({ "error": e.to_string() })),
+        },
+        Ok(Err(e)) => Json(json!({ "error": e.to_string() })),
+        Err(e) => Json(json!({ "error": format!("join error: {e}") })),
     }
 }
 

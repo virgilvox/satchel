@@ -7,6 +7,8 @@ use walkdir::WalkDir;
 use crate::embed::Embedder;
 use crate::rag::Database;
 
+pub mod archives;
+
 pub struct IngestConfig {
     pub chunk_size: usize,
     pub chunk_overlap: usize,
@@ -27,6 +29,20 @@ pub async fn ingest_path(
     embedder: &Embedder,
     config: &IngestConfig,
 ) -> Result<()> {
+    // Format-aware archive detection runs first. If the path matches a known
+    // archive layout (Slack workspace export, ChatGPT data export, etc.) we
+    // hand off to a specialized handler that emits one record per logical
+    // message/conversation rather than ingesting raw JSON blobs.
+    if let Some(kind) = archives::detect(path) {
+        eprintln!(
+            "[satchel] Detected {} archive at {}",
+            kind.name(),
+            path.display()
+        );
+        archives::ingest(kind, path, db, embedder)?;
+        return Ok(());
+    }
+
     if path.is_file() {
         ingest_file(path, db, embedder, config)?;
     } else if path.is_dir() {

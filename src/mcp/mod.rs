@@ -187,6 +187,7 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
 
     let results = match db.search(
         &query_embedding,
+        query,
         top_k,
         filter_source,
         filter_tags.as_deref(),

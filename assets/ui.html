@@ -89,6 +89,36 @@ section.active{display:block}
   main{margin-left:60px;padding:1rem}
   .cards{grid-template-columns:repeat(2,1fr)}
 }
+
+.ingest-row{display:flex;gap:0.5rem;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap}
+.ingest-row input[type=text],.ingest-row select{flex:1;min-width:240px;padding:0.6rem 0.8rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--font);font-size:0.9rem;outline:none}
+.ingest-row input[type=text]:focus,.ingest-row select:focus{border-color:var(--accent)}
+.ingest-row button{padding:0.6rem 1rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:var(--font);font-size:0.9rem;transition:all 0.15s}
+.ingest-row button:hover{border-color:var(--accent);color:var(--accent)}
+.ingest-row button.primary{background:var(--accent-dim);border-color:var(--accent);color:#0c0c14;font-weight:600}
+.ingest-row button.primary:hover{background:var(--accent);color:#0c0c14}
+.ingest-row button.danger{border-color:var(--error);color:var(--error)}
+.ingest-row button.danger:hover{background:var(--error);color:#0c0c14}
+.ingest-status{padding:0.7rem 1rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);font-size:0.85rem;color:var(--muted);min-height:1.5rem;font-family:'SF Mono',Monaco,Consolas,monospace;white-space:pre-wrap}
+.ingest-status.ok{border-color:var(--success);color:var(--success)}
+.ingest-status.err{border-color:var(--error);color:var(--error)}
+
+.modal-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:100;display:flex;align-items:center;justify-content:center}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);width:min(720px,90vw);max-height:80vh;display:flex;flex-direction:column}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:1rem 1.2rem;border-bottom:1px solid var(--border)}
+.modal-title{font-weight:600}
+.modal-close{background:transparent;border:none;color:var(--muted);font-size:1.5rem;cursor:pointer;line-height:1}
+.modal-close:hover{color:var(--text)}
+.modal-path{padding:0.6rem 1.2rem;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.85rem;color:var(--accent);border-bottom:1px solid var(--border);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.modal-list{flex:1;overflow-y:auto;padding:0.4rem 0}
+.modal-list .entry{padding:0.5rem 1.2rem;cursor:pointer;font-size:0.9rem;display:flex;gap:0.6rem;align-items:center}
+.modal-list .entry:hover{background:var(--card)}
+.modal-list .entry .icon-d{color:var(--accent)}
+.modal-list .entry .icon-f{color:var(--muted)}
+.modal-foot{display:flex;gap:0.5rem;justify-content:flex-end;padding:0.8rem 1.2rem;border-top:1px solid var(--border)}
+.modal-foot button{padding:0.5rem 1rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:var(--font);font-size:0.85rem}
+.modal-foot button.primary{background:var(--accent-dim);border-color:var(--accent);color:#0c0c14;font-weight:600}
+.modal-foot button:hover{border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -97,6 +127,8 @@ section.active{display:block}
   <a href="#" data-tab="dashboard" class="active">Dashboard</a>
   <a href="#" data-tab="documents">Documents</a>
   <a href="#" data-tab="search">Search</a>
+  <a href="#" data-tab="ingest">Ingest</a>
+  <a href="#" data-tab="manage">Manage</a>
   <a href="#" data-tab="connect">Connect</a>
   <div class="spacer"></div>
   <div class="status">
@@ -136,6 +168,65 @@ section.active{display:block}
     <div id="search-results"></div>
   </section>
 
+  <section id="ingest">
+    <h1>Ingest</h1>
+    <p class="instructions">
+      Paste a folder or file path, or use Browse to navigate. SATCHEL detects
+      Slack, ChatGPT, Claude.ai, Discord, WhatsApp and mbox archives
+      automatically and ingests with format-aware parsing.
+    </p>
+    <div class="ingest-row">
+      <input type="text" id="ingest-path" placeholder="/Users/you/Documents/slack-export" />
+      <button id="ingest-browse-btn">Browse&hellip;</button>
+      <button id="ingest-go-btn" class="primary">Ingest</button>
+    </div>
+    <div id="ingest-status" class="ingest-status"></div>
+  </section>
+
+  <section id="manage">
+    <h1>Manage Data</h1>
+    <p class="instructions">
+      Delete documents from the active vault. All deletions are immediate and
+      cannot be undone. The chunks index, FTS keyword index, and tags are
+      kept in sync automatically.
+    </p>
+    <h2>Delete by path prefix</h2>
+    <div class="ingest-row">
+      <input type="text" id="manage-prefix" placeholder="HeatSync Labs Slack export" />
+      <button id="manage-prefix-preview">Preview</button>
+      <button id="manage-prefix-delete" class="danger">Delete matches</button>
+    </div>
+    <div id="manage-prefix-status" class="ingest-status"></div>
+
+    <h2 style="margin-top:1.5rem">Delete by file type</h2>
+    <div class="ingest-row">
+      <select id="manage-type">
+        <option value="">Choose type&hellip;</option>
+        <option value="json">json</option>
+        <option value="md">md</option>
+        <option value="pdf">pdf</option>
+        <option value="docx">docx</option>
+        <option value="html">html</option>
+        <option value="csv">csv</option>
+        <option value="txt">txt</option>
+        <option value="slack">slack (archive records)</option>
+        <option value="chatgpt">chatgpt</option>
+        <option value="claude.ai">claude.ai</option>
+        <option value="discord">discord</option>
+        <option value="whatsapp">whatsapp</option>
+        <option value="mbox">mbox</option>
+      </select>
+      <button id="manage-type-preview">Preview</button>
+      <button id="manage-type-delete" class="danger">Delete matches</button>
+    </div>
+    <div id="manage-type-status" class="ingest-status"></div>
+
+    <h2 style="margin-top:2rem;color:var(--error)">Danger Zone</h2>
+    <p class="instructions">Wipe every document and chunk in the active vault. The schema and FTS index remain.</p>
+    <button id="manage-clear" class="danger">Wipe entire vault&hellip;</button>
+    <div id="manage-clear-status" class="ingest-status"></div>
+  </section>
+
   <section id="connect">
     <h1>Connect AI Clients</h1>
     <p class="instructions">
@@ -146,11 +237,26 @@ section.active{display:block}
       <button class="active" data-client="claude-desktop">Claude Desktop</button>
       <button data-client="claude-code">Claude Code</button>
       <button data-client="cursor">Cursor</button>
-      <button data-client="browser">Browser AI</button>
+      <button data-client="browser">claude.ai (web)</button>
     </div>
     <div id="connect-config"></div>
   </section>
 </main>
+
+<div id="browse-modal" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="modal-title">Pick a folder</span>
+      <button class="modal-close" id="browse-close">&times;</button>
+    </div>
+    <div class="modal-path" id="browse-current">~</div>
+    <div class="modal-list" id="browse-list"></div>
+    <div class="modal-foot">
+      <button id="browse-up">&uarr; Parent</button>
+      <button id="browse-pick" class="primary">Use this folder</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const API = window.location.origin;
@@ -262,10 +368,21 @@ const configs = {
     note: 'Replace /path/to/satchel with the actual path to the binary.'
   },
   'browser': {
-    title: 'Browser AI Clients',
-    instructions: 'SATCHEL is already running. These are your local endpoints:',
-    code: 'MCP Endpoint:  ' + window.location.origin + '/mcp\nREST API:      ' + window.location.origin + '/api/search\nWeb UI:        ' + window.location.origin + '/',
-    note: 'Use the claude-mcp browser extension to bridge Claude.ai to this SATCHEL instance. For ChatGPT, point a Custom GPT action at ' + window.location.origin + '/api/search.'
+    title: 'claude.ai (web)',
+    instructions: 'Claude.ai web does not natively support local MCP — its Connectors require an HTTPS public URL with OAuth. Two options:',
+    code:
+      '# Option 1 — Use Claude Desktop (recommended for local MCP)\n' +
+      '# Claude Desktop talks directly to this binary over stdio. Use the\n' +
+      '# Claude Desktop tab above for the config snippet.\n\n' +
+      '# Option 2 — Expose this server over HTTPS via a tunnel, then add it\n' +
+      '# as a Custom Connector in claude.ai Settings → Connectors.\n\n' +
+      '# Cloudflare Tunnel (free, no signup):\n' +
+      'cloudflared tunnel --url ' + window.location.origin + '\n\n' +
+      '# or ngrok:\n' +
+      'ngrok http 7428\n\n' +
+      '# Then in claude.ai → Settings → Connectors → Add Custom Connector,\n' +
+      '# point it at https://<your-tunnel-url>/mcp.',
+    note: 'For ChatGPT, the same tunnel URL can back a Custom GPT action targeting /api/search.'
   }
 };
 
@@ -296,6 +413,193 @@ function escHtml(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
+// ----- Ingest tab -----
+async function runIngest() {
+  const path = document.getElementById('ingest-path').value.trim();
+  const status = document.getElementById('ingest-status');
+  if (!path) {
+    status.className = 'ingest-status err';
+    status.textContent = 'Enter a path first.';
+    return;
+  }
+  status.className = 'ingest-status';
+  status.textContent = 'Ingesting ' + path + '... (this can take a while for large archives)';
+  try {
+    const r = await fetch(API + '/api/ingest', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({path})
+    });
+    const d = await r.json();
+    if (d.error) {
+      status.className = 'ingest-status err';
+      status.textContent = 'Failed: ' + d.error;
+    } else {
+      status.className = 'ingest-status ok';
+      status.textContent = 'Done. Vault now has ' + d.documents + ' documents, ' + d.chunks + ' chunks.';
+      checkStatus();
+    }
+  } catch (e) {
+    status.className = 'ingest-status err';
+    status.textContent = 'Network error: ' + e.message;
+  }
+}
+document.getElementById('ingest-go-btn').addEventListener('click', runIngest);
+document.getElementById('ingest-path').addEventListener('keydown', e => { if (e.key === 'Enter') runIngest(); });
+
+// ----- Browse modal -----
+const modal = document.getElementById('browse-modal');
+let browsePath = '';
+
+async function openBrowse() {
+  modal.style.display = 'flex';
+  await loadBrowse('');
+}
+async function loadBrowse(path) {
+  const r = await fetch(API + '/api/browse?path=' + encodeURIComponent(path));
+  const d = await r.json();
+  if (d.error) {
+    document.getElementById('browse-list').innerHTML = '<div class="empty">' + escHtml(d.error) + '</div>';
+    return;
+  }
+  browsePath = d.path;
+  document.getElementById('browse-current').textContent = browsePath;
+  const list = document.getElementById('browse-list');
+  if (!d.entries || d.entries.length === 0) {
+    list.innerHTML = '<div class="empty">Empty folder.</div>';
+    return;
+  }
+  list.innerHTML = d.entries.map(e =>
+    '<div class="entry" data-path="' + escHtml(e.path) + '" data-kind="' + e.kind + '">' +
+      '<span class="' + (e.kind === 'dir' ? 'icon-d' : 'icon-f') + '">' + (e.kind === 'dir' ? '📁' : '📄') + '</span>' +
+      '<span>' + escHtml(e.name) + '</span>' +
+    '</div>'
+  ).join('');
+  list.querySelectorAll('.entry').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.kind === 'dir') loadBrowse(el.dataset.path);
+    });
+  });
+}
+document.getElementById('ingest-browse-btn').addEventListener('click', openBrowse);
+document.getElementById('browse-close').addEventListener('click', () => modal.style.display = 'none');
+modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
+document.getElementById('browse-up').addEventListener('click', async () => {
+  const r = await fetch(API + '/api/browse?path=' + encodeURIComponent(browsePath));
+  const d = await r.json();
+  if (d.parent) loadBrowse(d.parent);
+});
+document.getElementById('browse-pick').addEventListener('click', () => {
+  document.getElementById('ingest-path').value = browsePath;
+  modal.style.display = 'none';
+});
+
+// ----- Manage tab -----
+async function deleteOp(body, statusEl, dryRun) {
+  statusEl.className = 'ingest-status';
+  statusEl.textContent = 'Working...';
+  try {
+    const r = await fetch(API + '/api/sources', {
+      method: 'DELETE',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({...body, dry_run: dryRun})
+    });
+    const d = await r.json();
+    if (d.error) {
+      statusEl.className = 'ingest-status err';
+      statusEl.textContent = 'Failed: ' + d.error;
+      return null;
+    }
+    const verb = dryRun ? 'Would delete' : 'Deleted';
+    statusEl.className = 'ingest-status ok';
+    statusEl.textContent = verb + ' ' + d.deleted_documents + ' documents and ' + d.deleted_chunks + ' chunks.';
+    if (!dryRun) checkStatus();
+    return d;
+  } catch (e) {
+    statusEl.className = 'ingest-status err';
+    statusEl.textContent = 'Network error: ' + e.message;
+    return null;
+  }
+}
+
+document.getElementById('manage-prefix-preview').addEventListener('click', () => {
+  const prefix = document.getElementById('manage-prefix').value.trim();
+  if (!prefix) return;
+  deleteOp({prefix}, document.getElementById('manage-prefix-status'), true);
+});
+document.getElementById('manage-prefix-delete').addEventListener('click', async () => {
+  const prefix = document.getElementById('manage-prefix').value.trim();
+  if (!prefix) return;
+  const preview = await deleteOp({prefix}, document.getElementById('manage-prefix-status'), true);
+  if (preview && preview.deleted_documents > 0) {
+    if (confirm('Permanently delete ' + preview.deleted_documents + ' documents matching "' + prefix + '"?')) {
+      deleteOp({prefix}, document.getElementById('manage-prefix-status'), false);
+    }
+  }
+});
+
+document.getElementById('manage-type-preview').addEventListener('click', () => {
+  const file_type = document.getElementById('manage-type').value;
+  if (!file_type) return;
+  deleteOp({file_type}, document.getElementById('manage-type-status'), true);
+});
+document.getElementById('manage-type-delete').addEventListener('click', async () => {
+  const file_type = document.getElementById('manage-type').value;
+  if (!file_type) return;
+  const preview = await deleteOp({file_type}, document.getElementById('manage-type-status'), true);
+  if (preview && preview.deleted_documents > 0) {
+    if (confirm('Permanently delete all ' + preview.deleted_documents + ' .' + file_type + ' documents?')) {
+      deleteOp({file_type}, document.getElementById('manage-type-status'), false);
+    }
+  }
+});
+
+document.getElementById('manage-clear').addEventListener('click', async () => {
+  const status = document.getElementById('manage-clear-status');
+  status.className = 'ingest-status';
+  status.textContent = 'Counting...';
+  try {
+    const dr = await fetch(API + '/api/clear', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({dry_run: true})
+    });
+    const dd = await dr.json();
+    if (dd.error) {
+      status.className = 'ingest-status err';
+      status.textContent = 'Failed: ' + dd.error;
+      return;
+    }
+    if (dd.deleted_documents === 0) {
+      status.className = 'ingest-status ok';
+      status.textContent = 'Vault is already empty.';
+      return;
+    }
+    const typed = prompt('Type WIPE to permanently delete ' + dd.deleted_documents + ' documents and ' + dd.deleted_chunks + ' chunks:');
+    if (typed !== 'WIPE') {
+      status.textContent = 'Cancelled.';
+      return;
+    }
+    const r = await fetch(API + '/api/clear', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({confirm: true})
+    });
+    const d = await r.json();
+    if (d.error) {
+      status.className = 'ingest-status err';
+      status.textContent = 'Failed: ' + d.error;
+    } else {
+      status.className = 'ingest-status ok';
+      status.textContent = 'Vault cleared. Removed ' + d.deleted_documents + ' documents and ' + d.deleted_chunks + ' chunks.';
+      checkStatus();
+    }
+  } catch (e) {
+    status.className = 'ingest-status err';
+    status.textContent = 'Network error: ' + e.message;
+  }
+});
 
 checkStatus();
 showConfig('claude-desktop');

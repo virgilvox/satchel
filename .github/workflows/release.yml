@@ -21,19 +21,24 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: satchel-linux-x86_64
+            archive: satchel-linux-x86_64.zip
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: satchel-linux-aarch64
+            archive: satchel-linux-aarch64.zip
             cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: satchel-macos-x86_64
+            archive: satchel-macos-x86_64.zip
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: satchel-macos-aarch64
+            archive: satchel-macos-aarch64.zip
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: satchel-windows-x86_64.exe
+            archive: satchel-windows-x86_64.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -65,18 +70,29 @@ jobs:
       - name: Build
         run: cargo build --release --features embed-model --target ${{ matrix.target }}
 
-      - name: Rename binary (unix)
+      - name: Stage binary (unix)
         if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/satchel ${{ matrix.artifact }}
+        run: |
+          cp target/${{ matrix.target }}/release/satchel ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
 
-      - name: Rename binary (windows)
+      - name: Stage binary (windows)
         if: runner.os == 'Windows'
         run: copy target\${{ matrix.target }}\release\satchel.exe ${{ matrix.artifact }}
 
+      - name: Package as zip (unix)
+        if: runner.os != 'Windows'
+        run: zip -j ${{ matrix.archive }} ${{ matrix.artifact }}
+
+      - name: Package as zip (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ${{ matrix.archive }}
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
 
   release:
     name: Create Release
@@ -88,11 +104,10 @@ jobs:
         with:
           path: artifacts
 
-      - name: Collect binaries
+      - name: Collect archives
         run: |
           mkdir release
-          find artifacts -type f -exec cp {} release/ \;
-          chmod +x release/satchel-* 2>/dev/null || true
+          find artifacts -type f -name '*.zip' -exec cp {} release/ \;
           ls -lh release/
 
       - name: Create GitHub Release
@@ -103,13 +118,17 @@ jobs:
           body: |
             ## Install
 
-            Download the binary for your platform. The embedding model is included. Nothing else to install.
+            Download the zip for your platform, extract, and run. The embedding model is included.
 
             ```bash
-            chmod +x satchel-*              # make executable (macOS/Linux)
-            ./satchel-*                     # launch web UI at http://localhost:7428
-            ./satchel-* ingest ~/notes/     # ingest your documents
-            ./satchel-* config              # get config snippet for your AI client
+            unzip satchel-macos-aarch64.zip       # also Linux & x86_64 variants
+            ./satchel-macos-aarch64               # launch web UI at http://localhost:7428
+            ./satchel-macos-aarch64 ingest ~/notes/
+            ./satchel-macos-aarch64 config        # MCP config snippet
             ```
+
+            On Windows, double-click the .zip to extract, then run `satchel-windows-x86_64.exe`.
+
+            On macOS the first launch may be blocked by Gatekeeper — right-click the binary in Finder and choose "Open" once to allow it.
 
             A default vault is created automatically on first run. See the [README](https://github.com/virgilvox/satchel#readme) for full documentation.

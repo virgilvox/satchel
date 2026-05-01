@@ -68,7 +68,33 @@ const SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(document_id);
     CREATE INDEX IF NOT EXISTS idx_docs_source ON documents(source_path);
     CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        text,
+        content='chunks',
+        content_rowid='rowid',
+        tokenize='unicode61 remove_diacritics 2'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+        INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+        INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+        INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+        INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+    END;
 "#;
+
+/// Reciprocal Rank Fusion constant. Standard value from Cormack et al. 2009.
+const RRF_K: f32 = 60.0;
+/// Sparse-leg candidate pool. The dense leg ranks the entire corpus so that
+/// post-fusion `filter_source` / `filter_tags` retain rank information from
+/// chunks deep in the dense ranking — a constant-K dense truncate would
+/// silently strip them.
+const RRF_SPARSE_LIMIT: usize = 200;
 
 impl Database {
     /// Open an in-memory database for testing. No files created.
@@ -81,6 +107,7 @@ impl Database {
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('embedding_dims', '384')",
             [],
         )?;
+        backfill_fts(&conn)?;
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -96,6 +123,7 @@ impl Database {
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('embedding_dims', '384')",
             [],
         )?;
+        backfill_fts(&conn)?;
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -150,61 +178,167 @@ impl Database {
         Ok(())
     }
 
+    /// Hybrid retrieval: dense (cosine over embeddings) + sparse (BM25 over FTS5),
+    /// fused via Reciprocal Rank Fusion. The dense leg pulls top RRF_CANDIDATES
+    /// by cosine; the sparse leg pulls top RRF_CANDIDATES by BM25; ranks are
+    /// combined per chunk as `Σ 1/(RRF_K + rank_i)` and the top_k winners returned.
+    ///
+    /// `query_text` is what FTS5 tokenizes for keyword matching. Pass the same
+    /// natural-language string the user typed; do not pre-tokenize.
     pub fn search(
         &self,
         query_embedding: &[f32],
+        query_text: &str,
         top_k: usize,
         filter_source: Option<&str>,
         filter_tags: Option<&[&str]>,
     ) -> Result<Vec<SearchResult>> {
         let conn = self.conn.lock().unwrap();
 
-        let mut stmt = conn.prepare(
-            "SELECT c.text, d.source_path, c.chunk_index, c.embedding,
-                    COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags
-             FROM chunks c
-             JOIN documents d ON d.id = c.document_id
-             LEFT JOIN tags t ON t.document_id = d.id
-             WHERE c.embedding IS NOT NULL
-             GROUP BY c.id",
-        )?;
+        let mut by_chunk: std::collections::HashMap<String, FusedRow> =
+            std::collections::HashMap::new();
 
-        let mut results: Vec<SearchResult> = stmt
-            .query_map([], |row| {
-                let embedding_blob: Vec<u8> = row.get(3)?;
-                let embedding = blob_to_embedding(&embedding_blob);
-                let score = cosine_similarity(query_embedding, &embedding);
-                Ok(SearchResult {
-                    text: row.get(0)?,
-                    source: row.get(1)?,
-                    score,
-                    chunk_index: row.get::<_, i64>(2)? as usize,
-                    tags: row
-                        .get::<_, String>(4)?
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect(),
-                })
-            })?
-            .filter_map(|r| r.ok())
+        // --- Dense leg: cosine over all embeddings, full ranking. We do not
+        // truncate before fusion because filter_source/filter_tags are applied
+        // after fusion and could otherwise drop legitimate hits below an
+        // arbitrary cutoff. For a 50K-chunk vault this is ~50K f32 dot
+        // products; <10ms on commodity hardware.
+        let dense: Vec<(String, f32)> = {
+            let mut stmt = conn.prepare(
+                "SELECT c.id, c.text, d.source_path, c.chunk_index, c.embedding,
+                        COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.document_id
+                 LEFT JOIN tags t ON t.document_id = d.id
+                 WHERE c.embedding IS NOT NULL
+                 GROUP BY c.id",
+            )?;
+
+            let rows: Vec<(String, FusedRow, f32)> = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let embedding_blob: Vec<u8> = row.get(4)?;
+                    let embedding = blob_to_embedding(&embedding_blob);
+                    let score = cosine_similarity(query_embedding, &embedding);
+                    let fr = FusedRow {
+                        text: row.get(1)?,
+                        source: row.get(2)?,
+                        chunk_index: row.get::<_, i64>(3)? as usize,
+                        tags: row
+                            .get::<_, String>(5)?
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                            .collect(),
+                        rrf: 0.0,
+                    };
+                    Ok((id, fr, score))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for (id, fr, _) in &rows {
+                by_chunk.insert(id.clone(), fr.clone());
+            }
+            let mut scored: Vec<(String, f32)> =
+                rows.into_iter().map(|(id, _, s)| (id, s)).collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored
+        };
+
+        // --- Sparse leg: BM25 over FTS5, take top RRF_CANDIDATES ---
+        // SQLite's bm25() is only callable when FTS5 is the FROM table, so we
+        // resolve rank in a CTE and JOIN out to chunks/documents in the outer.
+        let sparse: Vec<String> = match build_fts5_query(query_text) {
+            Some(fts_query) => {
+                let mut stmt = conn.prepare(
+                    "WITH fts AS (
+                         SELECT rowid, bm25(chunks_fts) AS bm25
+                         FROM chunks_fts
+                         WHERE chunks_fts MATCH ?1
+                         ORDER BY bm25
+                         LIMIT ?2
+                     )
+                     SELECT c.id, c.text, d.source_path, c.chunk_index,
+                            COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags,
+                            fts.bm25 AS score
+                     FROM fts
+                     JOIN chunks c ON c.rowid = fts.rowid
+                     JOIN documents d ON d.id = c.document_id
+                     LEFT JOIN tags t ON t.document_id = d.id
+                     GROUP BY c.id
+                     ORDER BY score",
+                )?;
+
+                let rows: Vec<(String, FusedRow)> = stmt
+                    .query_map(params![fts_query, RRF_SPARSE_LIMIT as i64], |row| {
+                        let id: String = row.get(0)?;
+                        let fr = FusedRow {
+                            text: row.get(1)?,
+                            source: row.get(2)?,
+                            chunk_index: row.get::<_, i64>(3)? as usize,
+                            tags: row
+                                .get::<_, String>(4)?
+                                .split(',')
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
+                                .collect(),
+                            rrf: 0.0,
+                        };
+                        Ok((id, fr))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+                for (id, fr) in rows {
+                    by_chunk.entry(id).or_insert(fr);
+                }
+                ids
+            }
+            // Empty/all-stopword query: skip sparse leg entirely.
+            None => Vec::new(),
+        };
+
+        // --- Reciprocal Rank Fusion ---
+        for (rank, (id, _)) in dense.iter().enumerate() {
+            if let Some(row) = by_chunk.get_mut(id) {
+                row.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
+            }
+        }
+        for (rank, id) in sparse.iter().enumerate() {
+            if let Some(row) = by_chunk.get_mut(id) {
+                row.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
+            }
+        }
+
+        let mut fused: Vec<SearchResult> = by_chunk
+            .into_iter()
+            .filter(|(_, fr)| fr.rrf > 0.0)
+            .map(|(_, fr)| SearchResult {
+                text: fr.text,
+                source: fr.source,
+                score: fr.rrf,
+                chunk_index: fr.chunk_index,
+                tags: fr.tags,
+            })
             .collect();
 
         if let Some(source) = filter_source {
-            results.retain(|r| r.source.contains(source));
+            fused.retain(|r| r.source.contains(source));
         }
         if let Some(tags) = filter_tags {
-            results.retain(|r| tags.iter().any(|t| r.tags.iter().any(|rt| rt == t)));
+            fused.retain(|r| tags.iter().any(|t| r.tags.iter().any(|rt| rt == t)));
         }
 
-        results.sort_by(|a, b| {
+        fused.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(top_k);
+        fused.truncate(top_k);
 
-        Ok(results)
+        Ok(fused)
     }
 
     pub fn list_sources(
@@ -326,6 +460,99 @@ impl Database {
         Ok(())
     }
 
+    /// Delete documents whose `source_path` or `id` is exactly `path`.
+    /// Returns `(deleted_documents, deleted_chunks)`. Wildcard chars (`%`,
+    /// `_`) in `path` are treated as literals — this is `=`, not `LIKE`.
+    pub fn delete_by_path_exact(
+        &self,
+        path: &str,
+        dry_run: bool,
+    ) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id FROM documents WHERE source_path = ?1 OR id = ?1")?;
+        let doc_ids: Vec<String> = stmt
+            .query_map(params![path], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        let chunk_count = count_chunks_for_docs(&conn, &doc_ids)?;
+        if dry_run || doc_ids.is_empty() {
+            return Ok((doc_ids.len(), chunk_count));
+        }
+        delete_docs_in_tx(&conn, &doc_ids)?;
+        Ok((doc_ids.len(), chunk_count))
+    }
+
+    /// Delete documents whose `source_path` starts with `prefix`. Underscores
+    /// and percent signs in `prefix` are escaped — they match literally, not
+    /// as SQL wildcards.
+    pub fn delete_by_path_prefix(
+        &self,
+        prefix: &str,
+        dry_run: bool,
+    ) -> Result<(usize, usize)> {
+        let pattern = format!("{}%", escape_like(prefix));
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r"SELECT id FROM documents WHERE source_path LIKE ?1 ESCAPE '\'",
+        )?;
+        let doc_ids: Vec<String> = stmt
+            .query_map(params![pattern], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        let chunk_count = count_chunks_for_docs(&conn, &doc_ids)?;
+        if dry_run || doc_ids.is_empty() {
+            return Ok((doc_ids.len(), chunk_count));
+        }
+        delete_docs_in_tx(&conn, &doc_ids)?;
+        Ok((doc_ids.len(), chunk_count))
+    }
+
+    /// Delete all documents of a given file_type (e.g., "json", "pdf").
+    pub fn delete_by_file_type(
+        &self,
+        file_type: &str,
+        dry_run: bool,
+    ) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id FROM documents WHERE file_type = ?1")?;
+        let doc_ids: Vec<String> = stmt
+            .query_map(params![file_type], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        let chunk_count = count_chunks_for_docs(&conn, &doc_ids)?;
+        if dry_run || doc_ids.is_empty() {
+            return Ok((doc_ids.len(), chunk_count));
+        }
+        delete_docs_in_tx(&conn, &doc_ids)?;
+        Ok((doc_ids.len(), chunk_count))
+    }
+
+    /// Wipe everything: documents, chunks, tags. Schema (and FTS index) remain.
+    pub fn clear_all(&self, dry_run: bool) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let doc_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+        let chunk_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        if dry_run {
+            return Ok((doc_count as usize, chunk_count as usize));
+        }
+        let tx = conn.unchecked_transaction()?;
+        // Delete chunks first (drops FTS rows via trigger), then tags, then docs.
+        tx.execute("DELETE FROM chunks", [])?;
+        tx.execute("DELETE FROM tags", [])?;
+        tx.execute("DELETE FROM documents", [])?;
+        tx.commit()?;
+        // Optimize the FTS index after bulk delete to reclaim pages.
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')", [])?;
+        Ok((doc_count as usize, chunk_count as usize))
+    }
+
     pub fn add_tag(&self, document_id: &str, tag: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -345,6 +572,111 @@ pub fn print_stats(db: &Database) -> Result<()> {
     println!("  Dimensions: {}", stats.embedding_dims);
     println!("  DB Size:    {}", stats.db_size_human);
     Ok(())
+}
+
+fn count_chunks_for_docs(conn: &Connection, doc_ids: &[String]) -> Result<usize> {
+    if doc_ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; doc_ids.len()].join(",");
+    let sql = format!(
+        "SELECT COUNT(*) FROM chunks WHERE document_id IN ({placeholders})"
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        doc_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let count: i64 = conn.query_row(&sql, params.as_slice(), |r| r.get(0))?;
+    Ok(count as usize)
+}
+
+/// Atomically delete a set of documents along with their chunks and tags.
+/// All three deletes happen in a single transaction so a partial failure
+/// (e.g. SQLite busy mid-way) leaves the vault consistent.
+fn delete_docs_in_tx(conn: &Connection, doc_ids: &[String]) -> Result<()> {
+    if doc_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = vec!["?"; doc_ids.len()].join(",");
+    let params: Vec<&dyn rusqlite::ToSql> =
+        doc_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        &format!("DELETE FROM chunks WHERE document_id IN ({placeholders})"),
+        params.as_slice(),
+    )?;
+    tx.execute(
+        &format!("DELETE FROM tags WHERE document_id IN ({placeholders})"),
+        params.as_slice(),
+    )?;
+    tx.execute(
+        &format!("DELETE FROM documents WHERE id IN ({placeholders})"),
+        params.as_slice(),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Escape SQL `LIKE` metacharacters so they match literally. The matching
+/// LIKE clause must use `ESCAPE '\\'` for this to work.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(c);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Per-chunk row carried through the fusion pipeline.
+#[derive(Clone)]
+struct FusedRow {
+    text: String,
+    source: String,
+    chunk_index: usize,
+    tags: Vec<String>,
+    rrf: f32,
+}
+
+/// Backfill FTS5 with any chunks already in the table that aren't yet indexed.
+/// Idempotent: a no-op for fresh databases (chunks empty) and for already-synced
+/// databases. Used on every open() to migrate pre-FTS5 vaults transparently.
+fn backfill_fts(conn: &Connection) -> Result<()> {
+    let missing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chunks WHERE rowid NOT IN (SELECT rowid FROM chunks_fts)",
+        [],
+        |r| r.get(0),
+    )?;
+    if missing > 0 {
+        eprintln!("[satchel] Building keyword index for {missing} existing chunks...");
+        conn.execute(
+            "INSERT INTO chunks_fts(rowid, text)
+             SELECT rowid, text FROM chunks
+             WHERE rowid NOT IN (SELECT rowid FROM chunks_fts)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Build a safe FTS5 MATCH expression from free-form user text.
+/// Strategy: tokenize on non-word boundaries, drop tokens shorter than 2 chars,
+/// double-quote each surviving token (escaping embedded quotes), join with OR.
+/// Returns None if no usable tokens remain (e.g. pure punctuation).
+fn build_fts5_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.')
+        .filter(|t| t.chars().count() >= 2)
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
 }
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
@@ -524,10 +856,11 @@ mod tests {
             .unwrap();
 
         let query = vec![1.0, 0.0, 0.0];
-        let results = db.search(&query, 5, None, None).unwrap();
+        let results = db.search(&query, "chunk text", 5, None, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "chunk text");
-        assert!((results[0].score - 1.0).abs() < 1e-6);
+        // RRF score: hit by dense + sparse, both at rank 0 → 2 * 1/(60+1) ≈ 0.0328
+        assert!(results[0].score > 0.0);
 
         cleanup(&dir);
     }
@@ -598,7 +931,9 @@ mod tests {
         db.insert_chunk("c2", "d2", 0, "work chunk", 5, 0, 5, &emb)
             .unwrap();
 
-        let results = db.search(&emb, 10, Some("/notes/"), None).unwrap();
+        let results = db
+            .search(&emb, "notes chunk", 10, Some("/notes/"), None)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].source.contains("/notes/"));
 
@@ -609,7 +944,7 @@ mod tests {
     fn test_search_empty_database() {
         let db = Database::open_memory().unwrap();
         let query = vec![1.0, 0.0, 0.0];
-        let results = db.search(&query, 5, None, None).unwrap();
+        let results = db.search(&query, "anything", 5, None, None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -628,7 +963,9 @@ mod tests {
             .unwrap();
         db.add_tag("d1", "important").unwrap();
 
-        let results = db.search(&emb, 10, None, Some(&["important"])).unwrap();
+        let results = db
+            .search(&emb, "chunk", 10, None, Some(&["important"]))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].source.contains("a.md"));
     }
@@ -681,6 +1018,290 @@ mod tests {
             .unwrap();
         let sources = db.list_sources(None, "date").unwrap();
         assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn test_hybrid_keyword_finds_proper_noun_dense_misses() {
+        // Regression: pure cosine on MiniLM-L6 fails to surface rare proper nouns
+        // even when they appear verbatim in the corpus. BM25 must close the gap.
+        // We seed many irrelevant chunks with the matching dense embedding to
+        // crowd them out of the dense-only top-k, then verify that "lumencanvas"
+        // still surfaces because its rare token wins the BM25 leg uncontested.
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d_target", "/target.md", "md", None, "x", "h0")
+            .unwrap();
+        db.insert_chunk(
+            "c_target",
+            "d_target",
+            0,
+            "I have it opening chromium with webGPU pointed at my app lumencanvas.studio",
+            10,
+            0,
+            10,
+            &[0.0, 1.0, 0.0], // orthogonal to query — dense-only would never find it
+        )
+        .unwrap();
+
+        let query_emb = vec![1.0, 0.0, 0.0];
+        for i in 0..30 {
+            let id = format!("d{i}");
+            db.insert_document(&id, &format!("/doc{i}.md"), "md", None, "x", &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                &format!("c{i}"),
+                &id,
+                0,
+                "completely unrelated content about gardening tomatoes",
+                10,
+                0,
+                10,
+                &query_emb,
+            )
+            .unwrap();
+        }
+
+        let results = db.search(&query_emb, "lumencanvas", 5, None, None).unwrap();
+        assert!(
+            results.iter().any(|r| r.text.contains("lumencanvas")),
+            "lumencanvas chunk must surface in hybrid results despite zero cosine"
+        );
+        // Should rank #1: gets both legs (sparse rank 0 + dense rank 30); the
+        // 30 dense-only chunks each get only the dense leg.
+        assert!(
+            results[0].text.contains("lumencanvas"),
+            "lumencanvas should be top-ranked due to BM25 contribution"
+        );
+    }
+
+    #[test]
+    fn test_filter_source_works_at_deep_dense_rank() {
+        // Regression: a previous version truncated the dense leg at 100
+        // candidates before applying filter_source. If the only chunk matching
+        // the user's filter ranked at dense rank 150, it would silently vanish.
+        // This test seeds 200 high-cosine "noise" chunks plus one filter-target
+        // chunk with a deliberately low cosine, then confirms filter_source
+        // still surfaces the target.
+        let db = Database::open_memory().unwrap();
+        let query_emb = vec![1.0, 0.0, 0.0];
+
+        for i in 0..200 {
+            let id = format!("n{i}");
+            db.insert_document(&id, &format!("/noise/{i}.md"), "md", None, "x", &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                &format!("nc{i}"),
+                &id,
+                0,
+                "noise",
+                1,
+                0,
+                1,
+                &query_emb, // perfect dense score, but won't pass filter
+            )
+            .unwrap();
+        }
+        db.insert_document("t1", "/target/only.md", "md", None, "x", "ht")
+            .unwrap();
+        db.insert_chunk("tc1", "t1", 0, "target chunk", 1, 0, 12, &[0.0, 0.0, 0.5])
+            .unwrap();
+
+        let results = db
+            .search(&query_emb, "target chunk", 5, Some("/target/"), None)
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "filter_source must find the target even when it ranks deep in dense"
+        );
+        assert!(results[0].source.contains("/target/"));
+    }
+
+    #[test]
+    fn test_fts5_query_builder_handles_punctuation() {
+        assert_eq!(build_fts5_query(""), None);
+        assert_eq!(build_fts5_query("!@#$%"), None);
+        assert_eq!(build_fts5_query("a"), None); // single char filtered
+        assert_eq!(
+            build_fts5_query("hello world"),
+            Some("\"hello\" OR \"world\"".to_string())
+        );
+        // Quotes are non-alphanumeric so they act as separators; the inner word
+        // survives unquoted (and so cannot break the FTS5 expression).
+        assert_eq!(
+            build_fts5_query("say \"hi\""),
+            Some("\"say\" OR \"hi\"".to_string())
+        );
+        // Hyphens, dots, underscores survive (useful for usernames, domains).
+        assert_eq!(
+            build_fts5_query("lumencanvas.studio user_name"),
+            Some("\"lumencanvas.studio\" OR \"user_name\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fts_backfill_for_chunks_inserted_pre_index() {
+        // Simulate an upgrade: insert chunks while triggers exist (they always do
+        // in our schema), then verify the FTS index is populated.
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_chunk("c1", "d1", 0, "the quick brown fox", 4, 0, 19, &[1.0, 0.0])
+            .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_delete_by_path_prefix() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/slack/general/2024-01-01.json", "json", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/slack/general/2024-01-02.json", "json", None, "b", "h2")
+            .unwrap();
+        db.insert_document("d3", "/notes/keep.md", "md", None, "c", "h3")
+            .unwrap();
+        db.insert_chunk("c1", "d1", 0, "x", 1, 0, 1, &[1.0, 0.0])
+            .unwrap();
+        db.insert_chunk("c2", "d2", 0, "y", 1, 0, 1, &[1.0, 0.0])
+            .unwrap();
+        db.insert_chunk("c3", "d3", 0, "z", 1, 0, 1, &[1.0, 0.0])
+            .unwrap();
+
+        let (d, c) = db.delete_by_path_prefix("/slack/general/", true).unwrap();
+        assert_eq!((d, c), (2, 2));
+        assert_eq!(db.stats().unwrap().document_count, 3, "dry_run must not delete");
+
+        let (d, c) = db.delete_by_path_prefix("/slack/general/", false).unwrap();
+        assert_eq!((d, c), (2, 2));
+        assert_eq!(db.stats().unwrap().document_count, 1);
+        assert_eq!(db.stats().unwrap().chunk_count, 1);
+    }
+
+    #[test]
+    fn test_delete_by_path_prefix_treats_underscore_literally() {
+        // Regression: an unescaped LIKE pattern would treat '_' as a wildcard,
+        // so `delete --prefix "/notes_2024"` would also delete "/notesX2024".
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/notes_2024/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/notesX2024/b.md", "md", None, "b", "h2")
+            .unwrap();
+
+        let (d, _) = db.delete_by_path_prefix("/notes_2024", false).unwrap();
+        assert_eq!(d, 1, "underscore must match literally, not as wildcard");
+        let remaining = db.list_sources(None, "name").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].path.contains("notesX2024"));
+    }
+
+    #[test]
+    fn test_delete_by_path_exact_treats_path_literally() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/foo_bar.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/fooXbar.md", "md", None, "b", "h2")
+            .unwrap();
+
+        let (d, _) = db.delete_by_path_exact("/foo_bar.md", false).unwrap();
+        assert_eq!(d, 1);
+        let remaining = db.list_sources(None, "name").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].path.contains("fooXbar"));
+    }
+
+    #[test]
+    fn test_delete_is_atomic_under_failure() {
+        // After a successful transactional delete, the document and its
+        // dependent rows are all gone. We verify the chunks/tags/documents
+        // counts are consistent (no orphaned chunks).
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_chunk("c1", "d1", 0, "chunk", 1, 0, 5, &[1.0])
+            .unwrap();
+        db.add_tag("d1", "important").unwrap();
+
+        db.delete_by_path_exact("/a.md", false).unwrap();
+        let s = db.stats().unwrap();
+        assert_eq!(s.document_count, 0);
+        assert_eq!(s.chunk_count, 0);
+        assert!(db.list_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_escape_like_helper() {
+        assert_eq!(escape_like("foo"), "foo");
+        assert_eq!(escape_like("foo_bar"), "foo\\_bar");
+        assert_eq!(escape_like("100%"), "100\\%");
+        assert_eq!(escape_like("a\\b"), "a\\\\b");
+        assert_eq!(escape_like("a_b%c\\d"), "a\\_b\\%c\\\\d");
+    }
+
+    #[test]
+    fn test_delete_by_file_type() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.json", "json", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/b.json", "json", None, "b", "h2")
+            .unwrap();
+        db.insert_document("d3", "/c.md", "md", None, "c", "h3")
+            .unwrap();
+
+        let (d, _) = db.delete_by_file_type("json", false).unwrap();
+        assert_eq!(d, 2);
+        assert_eq!(db.stats().unwrap().document_count, 1);
+    }
+
+    #[test]
+    fn test_delete_by_file_type_no_match() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        let (d, c) = db.delete_by_file_type("pdf", false).unwrap();
+        assert_eq!((d, c), (0, 0));
+        assert_eq!(db.stats().unwrap().document_count, 1);
+    }
+
+    #[test]
+    fn test_clear_all_dry_run_and_real() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_chunk("c1", "d1", 0, "x", 1, 0, 1, &[1.0])
+            .unwrap();
+        db.add_tag("d1", "important").unwrap();
+
+        let (d, c) = db.clear_all(true).unwrap();
+        assert_eq!((d, c), (1, 1));
+        assert_eq!(db.stats().unwrap().document_count, 1);
+
+        let (d, c) = db.clear_all(false).unwrap();
+        assert_eq!((d, c), (1, 1));
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.document_count, 0);
+        assert_eq!(stats.chunk_count, 0);
+        assert!(db.list_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_delete_drops_fts_entries() {
+        // FTS should stay in sync via triggers when chunks are deleted.
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_chunk("c1", "d1", 0, "uniqueword12345", 1, 0, 15, &[1.0])
+            .unwrap();
+
+        let results = db.search(&[1.0], "uniqueword12345", 5, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        db.delete_by_path_exact("/a.md", false).unwrap();
+
+        let results = db.search(&[1.0], "uniqueword12345", 5, None, None).unwrap();
+        assert!(results.is_empty(), "FTS entry should be removed by trigger");
     }
 
     #[test]

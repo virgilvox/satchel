@@ -388,6 +388,7 @@ checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
@@ -1607,6 +1608,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
+name = "mail-parser"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93c3b9e5d8b17faf573330bbc43b37d6e918c0a3bf8a88e7d0a220ebc84af9fc"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2357,18 +2367,21 @@ dependencies = [
 
 [[package]]
 name = "satchel-rag"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "chrono",
  "clap",
  "http-body-util",
  "lopdf",
+ "mail-parser",
  "notify",
  "proptest",
+ "regex",
  "rusqlite",
  "satchel-rag",
  "serde",

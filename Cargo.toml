@@ -1,6 +1,6 @@
 [package]
 name = "satchel-rag"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Portable RAG system on a USB drive. Single binary, local embeddings, MCP protocol."
 license = "AGPL-3.0-only"
@@ -69,6 +69,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 walkdir = "2"
 notify = "6"
+
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+mail-parser = "0.9"
+regex = "1"
 
 [features]
 default = []

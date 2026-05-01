@@ -4,19 +4,27 @@
 
 Portable RAG on a stick. Download one file, run it, and your entire knowledge base is available as context in Claude, ChatGPT, Cursor, or any MCP-compatible client. No cloud. No API keys. No installation. Everything runs locally.
 
+![Dashboard](assets/screenshots/01-dashboard.png)
+
+| | |
+|---|---|
+| ![Documents](assets/screenshots/02-documents.png) | ![Search](assets/screenshots/03-search.png) |
+| ![Connect](assets/screenshots/04-connect.png) | |
+
 ## Get Started
 
-**1. Download** the binary for your platform from the [latest release](https://github.com/virgilvox/satchel/releases/latest). The embedding model is included. Nothing else to install.
+**1. Download** the zip for your platform from the [latest release](https://github.com/virgilvox/satchel/releases/latest). The embedding model is included. Nothing else to install.
 
-**2. Run it:**
+**2. Extract and run:**
 
 ```bash
-./satchel
+unzip satchel-macos-aarch64.zip
+./satchel-macos-aarch64
 ```
 
-This starts the web UI at [http://localhost:7428](http://localhost:7428). A default vault is created automatically on first run.
+This starts the web UI at [http://localhost:7428](http://localhost:7428). A default vault is created automatically on first run. On macOS, the first launch may be blocked by Gatekeeper — right-click the binary in Finder and choose "Open" once to allow it.
 
-**3. Ingest your documents:**
+**3. Ingest your documents** — paste a path into the Ingest tab in the UI, or from the CLI:
 
 ```bash
 ./satchel ingest ~/Documents/notes/
@@ -64,13 +72,49 @@ Add to your Cursor MCP config:
 }
 ```
 
+## Connect to claude.ai (web)
+
+Claude.ai web does not natively support local MCP — its Connectors require an HTTPS public URL with OAuth. The simplest path: use Claude Desktop instead. If you must use claude.ai web, expose this server over HTTPS via a tunnel and add it as a Custom Connector:
+
+```bash
+# Cloudflare Tunnel (free, no signup):
+cloudflared tunnel --url http://localhost:7428
+
+# or ngrok:
+ngrok http 7428
+```
+
+Then in claude.ai → Settings → Connectors → Add Custom Connector, point it at `https://<your-tunnel>/mcp`.
+
 ## Web UI
 
-Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428). From there you can search your knowledge base, view ingested documents, and get connection instructions for any AI client.
+Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428):
+
+- **Dashboard** — vault stats, quick search.
+- **Documents** — browse ingested files.
+- **Search** — full hybrid retrieval with score ranking.
+- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected.
+- **Manage** — delete documents by path prefix or file type, or wipe the vault.
+- **Connect** — config snippets for every supported AI client.
 
 ## Supported File Types
 
-Markdown, plain text, PDF, DOCX, HTML, CSV, TSV, JSON.
+**Single files:** Markdown, plain text, PDF, DOCX, HTML, CSV, TSV, JSON.
+
+**Format-aware archives** (auto-detected and parsed structurally — no raw JSON blobs):
+
+| Archive | Detection | What you get |
+|---|---|---|
+| Slack workspace export | `users.json` + `channels.json` at root | One chunk per message with `@username`, `#channel`, dates resolved; threads glued to their parent. |
+| ChatGPT data export | `conversations.json` + `user.json` + `message_feedback.json` | One chunk per conversation, active branch only, system messages dropped. |
+| Claude.ai data export | `conversations.json` + `users.json` + `projects.json` | One chunk per conversation; attachment-extracted text inlined. |
+| Discord export | `{guild, channel, messages}` JSON (DiscordChatExporter) | One chunk per message; embeds attached as nested context. |
+| WhatsApp chat export | `_chat.txt` or `WhatsApp Chat with *.txt` | One chunk per message; date format auto-detected (12h/24h, M/D vs D/M). |
+| Email mbox | `.mbox` file or `From ` separator | One chunk per email with From/To/Subject/Date/Labels header. |
+
+## Hybrid Search
+
+Search runs **dense (cosine) + sparse (BM25)** retrieval in parallel and fuses results via Reciprocal Rank Fusion. This means proper nouns, usernames, project names, and exact phrases stay findable even when the embedding model has never seen them — the failure mode that breaks pure-vector RAG.
 
 ## Multiple Vaults
 
@@ -103,7 +147,9 @@ cargo build --release --features embed-model
 
 ## How It Works
 
-SATCHEL splits your documents into chunks and generates 384-dimensional vector embeddings using [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), running locally via [candle](https://github.com/huggingface/candle) (pure Rust, zero C dependencies). Chunks and embeddings are stored in a SQLite database. When your AI client asks a question, SATCHEL embeds the query, finds the most relevant chunks by cosine similarity, and returns them as context.
+SATCHEL generates 384-dimensional vector embeddings using [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), running locally via [candle](https://github.com/huggingface/candle) (pure Rust, zero C dependencies). Chunks and embeddings are stored in SQLite alongside an FTS5 keyword index. When your AI client asks a question, SATCHEL runs both retrievers in parallel and fuses ranks via RRF, then returns the top chunks as context.
+
+For structured archives (Slack, ChatGPT, etc.), each logical message/conversation becomes one chunk with a normalized header line — names and dates show up verbatim in BM25 instead of being buried inside opaque JSON.
 
 No data leaves your machine. No internet needed after download.
 
@@ -119,17 +165,35 @@ When connected, your AI client can use these tools:
 | `list_tags` | List tags and categories |
 | `vault_stats` | Storage stats, document counts, model info |
 
+## Managing Your Data
+
+```bash
+satchel delete <path>                       # exact source path
+satchel delete --prefix "HeatSync Slack"    # everything under that prefix
+satchel delete --type json                  # all .json documents
+satchel delete --prefix X --dry-run         # preview without deleting
+satchel clear                               # wipe entire active vault
+```
+
+The Manage tab in the web UI exposes the same operations with confirmation dialogs.
+
+Delete is intentionally **not** exposed via MCP — your AI client should not be able to remove your data.
+
 ## REST API
 
 Available when running with `--transport http` or with no arguments:
 
 ```
-GET  /api/status              Server status and vault stats
-GET  /api/sources             List ingested documents
-POST /api/search              Semantic search  {"query": "...", "top_k": 5}
-GET  /api/document?source=... Retrieve full document text
-GET  /api/tags                List all tags
-POST /mcp                     MCP Streamable HTTP endpoint
+GET    /api/status              Server status and vault stats
+GET    /api/sources             List ingested documents
+DELETE /api/sources             Delete by {path|prefix|file_type, dry_run?}
+POST   /api/search              Hybrid search  {"query": "...", "top_k": 5}
+GET    /api/document?source=... Retrieve full document text
+GET    /api/tags                List all tags
+GET    /api/browse?path=...     Server-side directory listing
+POST   /api/ingest              Ingest a path  {"path": "..."}
+POST   /api/clear               Wipe vault (requires {"confirm": true})
+POST   /mcp                     MCP Streamable HTTP endpoint
 ```
 
 All endpoints return JSON. CORS is enabled.
