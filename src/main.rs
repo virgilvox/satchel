@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
                             .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS")))
                             .unwrap_or(false);
                     let open = !no_browser && (std::io::stderr().is_terminal() || in_macos_bundle);
-                    server::serve(db, embedder, port, open).await?
+                    server::serve(db, embedder, port, open, vault_path.clone()).await?
                 }
                 other => anyhow::bail!("Unknown transport: {other}. Use 'stdio' or 'http'."),
             }

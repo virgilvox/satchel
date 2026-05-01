@@ -102,17 +102,35 @@ export const api = {
     ),
 
   tunnelStatus: () => getJson<TunnelState>('/api/tunnel'),
-  tunnelStart:  () => postJson<TunnelState>('/api/tunnel/start', {}),
+  tunnelStart:  (mode: TunnelMode = 'quick') =>
+    postJson<TunnelState>('/api/tunnel/start', { mode }),
   tunnelStop:   () => postJson<TunnelState>('/api/tunnel/stop', {}),
+  tunnelConfigGet:   () => getJson<TunnelConfigState>('/api/tunnel/config'),
+  tunnelConfigSet:   (body: { token: string; hostname: string }) =>
+    postJson<TunnelConfigState>('/api/tunnel/config', body),
+  tunnelConfigClear: () => deleteJson<TunnelConfigState>('/api/tunnel/config', {}),
 };
+
+export type TunnelMode = 'quick' | 'named';
 
 export interface TunnelState {
   installed: boolean;
   running: boolean;
+  mode: TunnelMode;
   url: string | null;
   forwarding: string | null;
   started_at: string | null;
   error: string | null;
+  named?: {
+    configured: boolean;
+    hostname: string | null;
+  };
+}
+
+export interface TunnelConfigState {
+  configured: boolean;
+  hostname: string | null;
+  error?: string;
 }
 
 export const ORIGIN = API_BASE;

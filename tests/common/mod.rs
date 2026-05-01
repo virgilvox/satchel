@@ -11,8 +11,11 @@ pub fn test_embedder() -> Embedder {
 
 pub fn test_router() -> axum::Router {
     // Port 0 is a valid sentinel for "no real bind" — the tunnel UI surfaces
-    // it but tests never actually start a tunnel.
-    satchel_rag::server::build_router(test_db(), test_embedder(), 0)
+    // it but tests never actually start a tunnel. Tunnel config lookups go to
+    // a temp vault path so we don't pollute the real one.
+    let tmp = std::env::temp_dir().join(format!("satchel-test-vault-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    satchel_rag::server::build_router(test_db(), test_embedder(), 0, tmp)
 }
 
 /// Seed the database with documents and chunks for search testing.

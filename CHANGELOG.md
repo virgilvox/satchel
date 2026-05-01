@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.3.0 — 2026-05-01
+
+### Tunnel: named-mode (stable URL on your own domain)
+
+v1.2.0 only did anonymous quick tunnels — random `*.trycloudflare.com`
+URLs that die with the satchel process. v1.3.0 adds **named tunnels**
+for users who already have (or want to set up) a Cloudflare Zero Trust
+tunnel pointed at their machine. The Connect-tab tunnel widget grew a
+two-tab toggle:
+
+- **Quick** (default, unchanged) — one-click anonymous tunnel.
+- **Named** — paste the connector token + the public hostname you
+  configured in the Cloudflare Zero Trust dashboard. Hit SAVE, then
+  START NAMED TUNNEL. cloudflared runs as
+  `cloudflared tunnel run --token <TOKEN>`, and the dashboard's
+  ingress config decides what local port to forward to. The hostname
+  becomes a stable URL across restarts.
+
+### Token storage
+
+Connector tokens are credentials — anyone with one can run a tunnel as
+your account — so they live server-side, never in `localStorage`:
+
+- Persisted to `<vault>/tunnel.toml` (same dir that holds `satchel.toml`).
+- Unix permissions chmod'd to **0600** after write.
+- The GET endpoint (`/api/tunnel/config`) only returns
+  `{ configured, hostname }`, never the token. The token only leaves
+  the file when satchel shells it into `cloudflared --token` at start
+  time.
+
+### Endpoints
+
+- `GET /api/tunnel` — now includes `mode: "quick" | "named"` and
+  `named: { configured, hostname }` so the UI can render its full
+  state from one fetch.
+- `POST /api/tunnel/start` — accepts `{ mode }` (default `"quick"`).
+  Named requires a saved config; rejects with a clear error otherwise.
+- `GET /api/tunnel/config` — `{ configured, hostname }`.
+- `POST /api/tunnel/config` — `{ token, hostname }`.
+- `DELETE /api/tunnel/config` — clears the file.
+
+### Library bits
+
+- `TunnelManager::start_named(token, hostname, port)` alongside the
+  existing `start_quick(port)`.
+- `TunnelConfig` struct with `load` / `save` / `clear` (TOML, 0600).
+- Stderr reader factored to a single `spawn_stderr_reader` with a
+  `UrlSource` enum: `ScrapeStderr` for quick tunnels (regex on the
+  banner), `OnConnectRegistered(public_url)` for named (waits for
+  `Registered tunnel connection` in stderr before flipping `state.url`
+  to the user-supplied hostname so the "starting → live" UI arc
+  stays meaningful).
+- Three new tests: config-roundtrip, blank-token-treated-as-unset,
+  start_named-rejects-empty-inputs.
+
+Verified end-to-end: save fake config → start named → cloudflared
+spawns with `--token` → stop reaps cleanly → DELETE config wipes the
+file. 139 cargo tests passing.
+
 ## v1.2.0 — 2026-05-01
 
 ### One-click public tunnels via bundled cloudflared

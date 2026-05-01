@@ -14,7 +14,8 @@ use crate::embed::Embedder;
 use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::rag::Database;
-use crate::tunnel::TunnelManager;
+use crate::tunnel::{TunnelConfig, TunnelManager, TunnelMode};
+use std::path::PathBuf;
 
 // The web UI is built from `web/` (Svelte 5 + Vite) into a single
 // self-contained HTML file via `vite-plugin-singlefile`. The build artifact
@@ -31,15 +32,20 @@ pub struct AppState {
     /// default forwarding target so the user never has to type the port
     /// twice.
     pub port: u16,
+    /// Vault directory that holds `tunnel.toml`. Different from the
+    /// active vault path used for the DB; this is the parent that all
+    /// vaults live under.
+    pub vault_path: PathBuf,
 }
 
-pub fn build_router(db: Database, embedder: Embedder, port: u16) -> Router {
+pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: PathBuf) -> Router {
     let state = Arc::new(AppState {
         db: Arc::new(db),
         embedder: Arc::new(embedder),
         jobs: Arc::new(JobRegistry::new()),
         tunnel: TunnelManager::new(),
         port,
+        vault_path,
     });
 
     Router::new()
@@ -61,6 +67,12 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16) -> Router {
         .route("/api/tunnel", get(api_tunnel_status))
         .route("/api/tunnel/start", post(api_tunnel_start))
         .route("/api/tunnel/stop", post(api_tunnel_stop))
+        .route(
+            "/api/tunnel/config",
+            get(api_tunnel_config_get)
+                .post(api_tunnel_config_set)
+                .delete(api_tunnel_config_clear),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -75,8 +87,9 @@ pub async fn serve(
     embedder: Embedder,
     port: u16,
     open_in_browser: bool,
+    vault_path: PathBuf,
 ) -> anyhow::Result<()> {
-    let app = build_router(db, embedder, port);
+    let app = build_router(db, embedder, port, vault_path);
 
     let addr = format!("127.0.0.1:{port}");
     eprintln!("[satchel] Web UI:       http://{addr}");
@@ -658,11 +671,58 @@ async fn api_tunnel_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     // Refresh `installed` on every poll — cheap (~1 fork) and lets the UI
     // recover when the user installs cloudflared after first load.
     let _ = state.tunnel.check_installed().await;
-    Json(json!(state.tunnel.snapshot()))
+    let snap = state.tunnel.snapshot();
+    // Surface "is named-tunnel config saved?" + the configured hostname
+    // alongside the live tunnel state so the UI can render a single
+    // coherent view from one fetch.
+    let cfg = TunnelConfig::load(&state.vault_path).ok().flatten();
+    Json(json!({
+        "installed": snap.installed,
+        "running": snap.running,
+        "mode": snap.mode,
+        "url": snap.url,
+        "forwarding": snap.forwarding,
+        "started_at": snap.started_at,
+        "error": snap.error,
+        "named": {
+            "configured": cfg.is_some(),
+            "hostname": cfg.as_ref().map(|c| c.hostname.clone()),
+        },
+    }))
 }
 
-async fn api_tunnel_start(State(state): State<Arc<AppState>>) -> Json<Value> {
-    match state.tunnel.start_quick(state.port).await {
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct StartTunnelRequest {
+    /// "quick" (default) or "named". Named requires a saved
+    /// `<vault>/tunnel.toml`.
+    mode: Option<String>,
+}
+
+async fn api_tunnel_start(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<StartTunnelRequest>,
+) -> Json<Value> {
+    let mode = req.mode.as_deref().unwrap_or("quick").to_lowercase();
+    let result = match mode.as_str() {
+        "quick" => state.tunnel.start_quick(state.port).await,
+        "named" => match TunnelConfig::load(&state.vault_path) {
+            Ok(Some(cfg)) => {
+                state
+                    .tunnel
+                    .start_named(&cfg.token, &cfg.hostname, state.port)
+                    .await
+            }
+            Ok(None) => Err(anyhow::anyhow!(
+                "no named-tunnel config saved — POST a token + hostname to /api/tunnel/config first"
+            )),
+            Err(e) => Err(e),
+        },
+        other => Err(anyhow::anyhow!(
+            "unknown tunnel mode: {other}. Use 'quick' or 'named'."
+        )),
+    };
+    match result {
         Ok(_) => Json(json!(state.tunnel.snapshot())),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
@@ -674,3 +734,65 @@ async fn api_tunnel_stop(State(state): State<Arc<AppState>>) -> Json<Value> {
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }
+
+// ─── Named-tunnel config (token + hostname) — persisted to vault ───────
+
+async fn api_tunnel_config_get(State(state): State<Arc<AppState>>) -> Json<Value> {
+    // NEVER return the saved token over the wire. Only report whether
+    // we have one and what hostname it points at — that's all the UI
+    // needs to render its "configured: vault.example.com" pill.
+    match TunnelConfig::load(&state.vault_path) {
+        Ok(Some(cfg)) => Json(json!({
+            "configured": true,
+            "hostname": cfg.hostname,
+        })),
+        Ok(None) => Json(json!({ "configured": false, "hostname": null })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetTunnelConfigRequest {
+    token: String,
+    hostname: String,
+}
+
+async fn api_tunnel_config_set(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetTunnelConfigRequest>,
+) -> Json<Value> {
+    let token = req.token.trim().to_string();
+    let hostname = req
+        .hostname
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    if token.is_empty() {
+        return Json(json!({ "error": "token must not be empty" }));
+    }
+    if hostname.is_empty() {
+        return Json(json!({ "error": "hostname must not be empty" }));
+    }
+    let cfg = TunnelConfig {
+        token,
+        hostname: hostname.clone(),
+    };
+    match cfg.save(&state.vault_path) {
+        Ok(_) => Json(json!({ "configured": true, "hostname": hostname })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_tunnel_config_clear(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match TunnelConfig::clear(&state.vault_path) {
+        Ok(_) => Json(json!({ "configured": false, "hostname": null })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+// Reference TunnelMode so the import isn't dead — even though we serialize
+// it via the snapshot, the import is needed for `cfg!`-style use elsewhere.
+#[allow(dead_code)]
+fn _tunnel_mode_referenced(_m: TunnelMode) {}
