@@ -1,6 +1,6 @@
 [package]
 name = "satchel-rag"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "Portable RAG system on a USB drive. Single binary, local embeddings, MCP protocol."
 license = "AGPL-3.0-only"

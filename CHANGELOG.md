@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.3.4 — 2026-05-01
+
+### Chat: constrained-mode tool calling that works with any model
+
+v0.3.x shipped a chat that broke instantly on every model except the
+five Hermes IDs WebLLM whitelists for its native `tools=` API
+("ChatCompletionRequest.tools is not supported for Llama-3.2-1B-…").
+That whole path is now dead. The new flow is lifted from
+`mockups/satchel-chat (15).html`, which has been mostly-functional all
+along — I just hadn't read it carefully enough.
+
+Output is constrained at the logit level via WebLLM's `response_format`
++ XGrammar:
+
+- `lib/agent.ts` — builds an agent JSON-schema that locks the model's
+  output to `{thought, tool_call: {name, arguments}}`. The `tool_call`
+  is an `anyOf` over per-tool variants where `name` is a const string
+  and `arguments` matches that tool's actual parameter shape (with
+  XGrammar-incompatible bits like `minItems`/`maxItems`/`pattern`
+  stripped). A `respond_to_user` pseudo-tool with `{answer}` lets the
+  model signal "I'm done."
+- Loose-schema fallback when XGrammar rejects an MCP tool's input
+  schema even after sanitization.
+- The system prompt enumerates tools, anti-narration rules, and
+  persistence rules — verbatim adapted from the mockup's
+  `constrainedSystemPrompt()`.
+- The chat loop streams `thought` live so the user sees the model
+  reasoning instead of a static placeholder, then either dispatches
+  the parsed tool call to MCP and loops, or terminates on
+  `respond_to_user`.
+
+Curated model list bumped to 11 entries (Llama 3.2 1B/3B, Hermes 3
+3B/8B, Hermes 2 Pro Llama/Mistral 8B, Qwen 2.5 3B, Phi 3.5 mini,
+Gemma 2 2B, Llama 3.1 8B, DeepSeek R1 Distill 7B). Every one drives
+tool calls correctly under constrained mode, not just the FC-tuned
+Hermes variants.
+
+### Chat: layout fixes the user kept asking for
+
+- **Clear chat is no longer hidden in a sidebar section.** It lives in
+  a strip directly above the chat — alongside live status pills
+  (model, MCP, round counter) — and only appears once there's a
+  transcript to clear.
+- **Mobile-first.** The 280 px settings rail collapses off-canvas at
+  ≤880 px and slides in from a `☰ MODEL · MCP` toggle in the strip.
+  Backdrop closes it; the close-x button does too. All other tabs
+  pass a 390 px-viewport audit (Playwright walks every tab; zero
+  elements overflow the viewport, zero console errors, zero page
+  errors).
+
+### Embed: 512-token truncation (was crashing on long mbox emails)
+
+`index-select invalid index 512 with dim size 512` — BERT models in
+the registry have `max_position_embeddings: 512`, but the tokenizer
+happily produced multi-thousand-token sequences for long emails. The
+position-embedding lookup blew up. Fixed by truncating
+`input_ids`/`attention_mask`/`token_type_ids` to 512 in
+`run_inference` and replacing the final WordPiece with `[SEP]` (token
+102, same in BGE/MiniLM) so the model still sees a sentence end.
+Verified end-to-end with a 67 kB synthetic input — produces a clean
+unit-norm 384-d vector instead of crashing.
+
+### README screenshots refreshed
+
+New gallery: dashboard / ask / chat / search / documents / connect.
+Captured against the v0.3.4 build via Playwright at 1440×900 @ 2x.
+
 ## v0.3.3 — 2026-05-01
 
 ### Executable icons

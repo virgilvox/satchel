@@ -11,8 +11,9 @@ Portable RAG on a stick. Download one file, run it, and your entire knowledge ba
 
 | | |
 |---|---|
-| ![Documents](assets/screenshots/02-documents.png) | ![Search](assets/screenshots/03-search.png) |
-| ![Connect](assets/screenshots/04-connect.png) | |
+| ![Ask](assets/screenshots/02-ask.png) | ![Chat](assets/screenshots/03-chat.png) |
+| ![Search](assets/screenshots/04-search.png) | ![Documents](assets/screenshots/05-documents.png) |
+| ![Connect](assets/screenshots/06-connect.png) | |
 
 ## Get Started
 

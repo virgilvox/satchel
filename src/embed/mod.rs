@@ -278,9 +278,30 @@ impl Embedder {
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
 
-        let input_ids: Vec<u32> = encoding.get_ids().to_vec();
-        let attention_mask: Vec<u32> = encoding.get_attention_mask().to_vec();
-        let token_type_ids: Vec<u32> = encoding.get_type_ids().to_vec();
+        // Both BGE-small-en-v1.5 and all-MiniLM-L6-v2 ship a BERT config with
+        // `max_position_embeddings: 512`. The tokenizer.json may or may not
+        // configure truncation; long inputs (mbox emails, big PDFs) blow past
+        // 512 tokens and `index-select invalid index 512 with dim size 512`
+        // surfaces from the position-embedding lookup. Hard-cap the slice
+        // here so every model in the registry stays within bounds.
+        const MAX_SEQ_LEN: usize = 512;
+        // BERT uncased WordPiece [SEP] = 102 — same in BGE/MiniLM. Used to
+        // cap a truncated sequence so the model still sees a sentence end.
+        const SEP_TOKEN_ID: u32 = 102;
+
+        let mut input_ids: Vec<u32> = encoding.get_ids().to_vec();
+        let mut attention_mask: Vec<u32> = encoding.get_attention_mask().to_vec();
+        let mut token_type_ids: Vec<u32> = encoding.get_type_ids().to_vec();
+        if input_ids.len() > MAX_SEQ_LEN {
+            input_ids.truncate(MAX_SEQ_LEN);
+            attention_mask.truncate(MAX_SEQ_LEN);
+            token_type_ids.truncate(MAX_SEQ_LEN);
+            // Replace the final WordPiece with [SEP] so the model still
+            // sees a closing-sentence token rather than a mid-word fragment.
+            if let Some(last) = input_ids.last_mut() {
+                *last = SEP_TOKEN_ID;
+            }
+        }
         let seq_len = input_ids.len();
 
         let input_ids_t = Tensor::new(&input_ids[..], device)?.unsqueeze(0)?;
