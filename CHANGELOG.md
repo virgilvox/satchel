@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.1.1 — 2026-05-01
+
+### Ask: drop the 600-char hard truncate
+
+`MessageBubble` was passing `truncate={600}` into `ResultRow` for the
+Ask-tab retrieval rows, which clipped every passage at 600 characters
+in the *data* (not just the view). The user noticed long mbox emails
+came back chopped. `ResultRow` already has a `max-height: 220px` /
+`overflow-y: auto` scroll-clip in CSS — same one Search uses — so
+removing the hard truncate gets the full chunk text in the data with
+visual scroll-clip in the row. Same fix landed as `b56717e` on `main`;
+this release just tags it.
+
+### Ingest: full file-type list visible on the page
+
+The Ingest tab's description only listed archive types. Added a
+single-paragraph instructions block that names every supported format:
+
+- **Single files:** `md` · `txt` · `pdf` · `docx` · `html` · `csv` ·
+  `tsv` · `json`
+- **Format-aware archives** (auto-detected, parsed structurally — no
+  raw JSON in your vault): Slack exports · ChatGPT exports · Claude.ai
+  exports · Discord (DiscordChatExporter) · WhatsApp chat exports ·
+  `.mbox` mail.
+
+### README: hero screenshots + captions
+
+Three full-width screenshots above the fold (Dashboard, Chat, Ingest)
+showcase the headline features; the rest live in a 2-up grid below.
+Every screenshot has an italic caption explaining what it shows and
+why it's there. Chat and Ingest re-shot against the v1.1.x build so
+the new strip (gear button, ctx pill) and the new Ingest description
+are visible.
+
 ## v1.1.0 — 2026-05-01
 
 ### Chat: settings modal + context-fill recovery

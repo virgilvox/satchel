@@ -110,7 +110,27 @@
 </script>
 
 <ViewHead num="05" title={`INGEST <span class="slash">/</span> ABSORB INTO VAULT`}
-  desc="Detects Slack, ChatGPT, Claude.ai, Discord, WhatsApp and mbox archives automatically. Each path runs as its own job." />
+  desc="Drop a folder or a single file. Format-aware parsers handle archives; standard documents flow through their own extractor. Each path runs as its own job." />
+
+<p class="instructions">
+  Paste a path or use <em>Browse…</em> to navigate.
+  <strong>Single files:</strong>
+  <code>md</code> ·
+  <code>txt</code> ·
+  <code>pdf</code> ·
+  <code>docx</code> ·
+  <code>html</code> ·
+  <code>csv</code> ·
+  <code>tsv</code> ·
+  <code>json</code>.
+  <strong>Format-aware archives</strong> (auto-detected, parsed structurally —
+  no raw JSON blobs in your vault): <code>Slack</code> exports ·
+  <code>ChatGPT</code> exports · <code>Claude.ai</code> exports ·
+  <code>Discord</code> (DiscordChatExporter) ·
+  <code>WhatsApp</code> chat exports · <code>.mbox</code> mail.
+  Multiple paths can queue concurrently — each runs as its own job with
+  live progress below.
+</p>
 
 <div class="row">
   <input type="text" class="input grow" placeholder="/Users/you/Documents/slack-export"
@@ -185,6 +205,20 @@
 </Modal>
 
 <style>
+  .instructions {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.7;
+    margin: 0 0 18px;
+  }
+  .instructions strong { color: var(--text-bright); font-weight: 700; }
+  .instructions em { color: var(--amber); font-style: normal; }
+  .instructions code {
+    color: var(--teal);
+    background: var(--teal-soft);
+    padding: 1px 6px;
+    font-size: 11px;
+  }
   .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
   .grow { flex: 1; min-width: 220px; }
   .job {

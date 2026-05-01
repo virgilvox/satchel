@@ -7,13 +7,45 @@
 
 Portable RAG on a stick. Download one file, run it, and your entire knowledge base is available as context in Claude, ChatGPT, Cursor, or any MCP-compatible client — or chat with it directly in the bundled in-browser LLM. No cloud. No API keys. No installation. Everything runs locally.
 
-![Dashboard](assets/screenshots/01-dashboard.png)
+![Dashboard — vault stats, quick search, embedding-model status](assets/screenshots/01-dashboard.png)
+*Dashboard — at-a-glance health for your portable knowledge corpus: doc and chunk counts, on-disk footprint, embedding-model state, and a quick-search box hot-wired to hybrid retrieval.*
 
-| | |
-|---|---|
-| ![Ask](assets/screenshots/02-ask.png) | ![Chat](assets/screenshots/03-chat.png) |
-| ![Search](assets/screenshots/04-search.png) | ![Documents](assets/screenshots/05-documents.png) |
-| ![Ingest](assets/screenshots/07-ingest.png) | ![Connect](assets/screenshots/06-connect.png) |
+![Chat — in-browser LLM with constrained-mode tool calling against the local MCP server](assets/screenshots/03-chat.png)
+*Chat — a small LLM runs entirely in your browser via WebGPU. Output is constrained to a per-tool JSON schema by an XGrammar logit mask, so the model literally cannot hallucinate tool names or emit invalid JSON. Tool calls dispatch to the local MCP server inline. Nothing leaves your machine.*
+
+![Ingest — format-aware archive parsers + standard single-file extractors](assets/screenshots/07-ingest.png)
+*Ingest — drop a folder or a single file. Single-file extractors handle Markdown, plain text, PDF, DOCX, HTML, CSV, TSV, and JSON; format-aware parsers detect Slack / ChatGPT / Claude.ai / Discord / WhatsApp / mbox archives and ingest with structural awareness (one chunk per message/conversation, sender + date resolved into the chunk text — no raw JSON in your vault). Multiple paths run concurrently with live counters.*
+
+<table>
+<tr>
+<td width="50%">
+
+![Ask](assets/screenshots/02-ask.png)
+*Ask — conversational entry to the vault. Pure retrieval, no LLM: phrase a question, the vault returns the top passages with source attribution and RRF scores.*
+
+</td>
+<td width="50%">
+
+![Search](assets/screenshots/04-search.png)
+*Search — full hybrid retrieval. Dense embeddings fused with keyword FTS via Reciprocal Rank Fusion so proper nouns, usernames, and exact phrases stay findable even when the embedding has never seen them.*
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+![Documents](assets/screenshots/05-documents.png)
+*Documents — every ingested source path with chunk and record counts. Filter by substring, sort by name / date / chunks / records, drill in for context.*
+
+</td>
+<td width="50%">
+
+![Connect](assets/screenshots/06-connect.png)
+*Connect — MCP config snippets for Claude Desktop, Claude Code, Cursor, and claude.ai (web). One click to copy.*
+
+</td>
+</tr>
+</table>
 
 ## Get Started
 
