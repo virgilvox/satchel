@@ -50,6 +50,15 @@ h2{font-size:1.1rem;font-weight:600;margin-bottom:1rem;color:var(--muted)}
 .result .meta{display:flex;justify-content:space-between;margin-bottom:0.5rem;font-size:0.8rem;color:var(--muted)}
 .result .score{color:var(--accent);font-weight:600}
 .result .text{font-size:0.9rem;line-height:1.6;white-space:pre-wrap;max-height:200px;overflow-y:auto}
+.load-more-wrap{display:flex;justify-content:space-between;align-items:center;padding:0.75rem 0;gap:1rem}
+.load-more-info{font-size:0.8rem;color:var(--muted)}
+.load-more-btn{padding:0.5rem 1rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:var(--font);font-size:0.85rem}
+.load-more-btn:hover{border-color:var(--accent);color:var(--accent)}
+.context-link{font-size:0.75rem;color:var(--muted);text-decoration:underline}
+.context-link:hover{color:var(--accent)}
+.context-msg{padding:0.6rem 1.2rem;font-size:0.85rem;line-height:1.5;white-space:pre-wrap;border-bottom:1px solid var(--border);font-family:'SF Mono',Monaco,Consolas,monospace}
+.context-msg.match{background:#1f2a3a;border-left:3px solid var(--accent);padding-left:calc(1.2rem - 3px)}
+.context-msg .ctx-title{display:block;font-size:0.7rem;color:var(--muted);font-family:var(--font);margin-bottom:0.2rem;text-transform:uppercase;letter-spacing:0.05em}
 
 .doc-table{width:100%;border-collapse:collapse}
 .doc-table th{text-align:left;padding:0.6rem 0.8rem;font-size:0.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;border-bottom:1px solid var(--border)}
@@ -119,6 +128,23 @@ section.active{display:block}
 .modal-foot button{padding:0.5rem 1rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:var(--font);font-size:0.85rem}
 .modal-foot button.primary{background:var(--accent-dim);border-color:var(--accent);color:#0c0c14;font-weight:600}
 .modal-foot button:hover{border-color:var(--accent)}
+
+.job{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:0.9rem 1rem;margin-bottom:0.6rem}
+.job-head{display:flex;justify-content:space-between;gap:0.75rem;align-items:flex-start;margin-bottom:0.4rem}
+.job-path{font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.85rem;color:var(--text);word-break:break-all;flex:1}
+.job-status{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;padding:0.15rem 0.5rem;border-radius:4px;flex-shrink:0;white-space:nowrap}
+.job-status.running{background:#1e2a3a;color:#60a5fa}
+.job-status.pending{background:#2a2538;color:#c084fc}
+.job-status.completed{background:#1e3a2f;color:#34d399}
+.job-status.failed{background:#3b1f1f;color:#f87171}
+.job-meta{display:flex;flex-wrap:wrap;gap:0.5rem 1rem;font-size:0.78rem;color:var(--muted);margin-bottom:0.3rem}
+.job-meta b{color:var(--text);font-weight:600}
+.job-meta .archive-tag{color:var(--accent);font-weight:600}
+.job-current{font-family:'SF Mono',Monaco,Consolas,monospace;font-size:0.75rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:0.2rem}
+.job-error{color:var(--error);font-size:0.8rem;margin-top:0.4rem;font-family:'SF Mono',Monaco,Consolas,monospace}
+.job-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:0.5rem;position:relative}
+.job-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-dim));width:30%;animation:job-pulse 1.4s ease-in-out infinite}
+@keyframes job-pulse{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
 </style>
 </head>
 <body>
@@ -156,6 +182,19 @@ section.active{display:block}
 
   <section id="documents">
     <h1>Documents</h1>
+    <div class="ingest-row" style="margin-bottom:1rem">
+      <input type="text" id="doc-q" placeholder="Filter by path substring (case-sensitive)" />
+      <select id="doc-type">
+        <option value="">All types</option>
+      </select>
+      <select id="doc-sort">
+        <option value="name">Sort: name</option>
+        <option value="date">Sort: date (newest first)</option>
+        <option value="chunks">Sort: chunks (most first)</option>
+        <option value="records">Sort: records (most first)</option>
+      </select>
+    </div>
+    <div id="doc-summary" class="ingest-status" style="margin-bottom:0.75rem"></div>
     <div id="doc-list"><div class="loading">Loading documents...</div></div>
   </section>
 
@@ -173,7 +212,8 @@ section.active{display:block}
     <p class="instructions">
       Paste a folder or file path, or use Browse to navigate. SATCHEL detects
       Slack, ChatGPT, Claude.ai, Discord, WhatsApp and mbox archives
-      automatically and ingests with format-aware parsing.
+      automatically and ingests with format-aware parsing. You can queue
+      multiple paths — each runs as its own job and progress is tracked below.
     </p>
     <div class="ingest-row">
       <input type="text" id="ingest-path" placeholder="/Users/you/Documents/slack-export" />
@@ -181,6 +221,9 @@ section.active{display:block}
       <button id="ingest-go-btn" class="primary">Ingest</button>
     </div>
     <div id="ingest-status" class="ingest-status"></div>
+
+    <h2 style="margin-top:1.75rem">Jobs</h2>
+    <div id="jobs-list"><div class="empty">No ingest jobs yet.</div></div>
   </section>
 
   <section id="manage">
@@ -258,6 +301,17 @@ section.active{display:block}
   </div>
 </div>
 
+<div id="context-modal" class="modal-backdrop" style="display:none">
+  <div class="modal" style="width:min(900px,92vw);max-height:85vh">
+    <div class="modal-head">
+      <span class="modal-title">Conversation context</span>
+      <button class="modal-close" id="context-close">&times;</button>
+    </div>
+    <div class="modal-path" id="context-source">&nbsp;</div>
+    <div class="modal-list" id="context-list"></div>
+  </div>
+</div>
+
 <script>
 const API = window.location.origin;
 
@@ -269,6 +323,7 @@ document.querySelectorAll('nav a[data-tab]').forEach(a => {
     a.classList.add('active');
     document.getElementById(a.dataset.tab).classList.add('active');
     if (a.dataset.tab === 'documents') loadDocuments();
+    if (a.dataset.tab === 'ingest') refreshJobs();
   });
 });
 
@@ -291,62 +346,223 @@ async function checkStatus() {
   }
 }
 
-async function doSearch(query, targetId) {
+// Per-target pagination state. Holds the active query, accumulated results,
+// and total count so "Load more" can append the next page.
+const searchState = {};
+const PAGE_SIZE = 20;
+const DASH_PAGE_SIZE = 8;
+
+function renderResults(targetId, append) {
+  const st = searchState[targetId];
+  const target = document.getElementById(targetId);
+  if (!st || !st.results.length) {
+    target.innerHTML = '<div class="empty">No results found.</div>';
+    return;
+  }
+  const cards = st.results.map((r, idx) =>
+    '<div class="result" data-idx="' + idx + '">' +
+      '<div class="meta">' +
+        '<span>' + escHtml(r.source) + '</span>' +
+        '<span><a href="#" class="context-link" data-target="' + targetId + '" data-idx="' + idx + '">Show context</a> &nbsp;' +
+        '<span class="score">' + r.score.toFixed(3) + '</span></span>' +
+      '</div>' +
+      '<div class="text">' + escHtml(r.text) + '</div>' +
+    '</div>'
+  ).join('');
+  const more = st.results.length < st.total
+    ? '<div class="load-more-wrap"><span class="load-more-info">Showing ' + st.results.length + ' of ' + st.total + '</span>' +
+      '<button class="load-more-btn" data-target="' + targetId + '">Load more</button></div>'
+    : (st.total > 0 ? '<div class="load-more-wrap"><span class="load-more-info">All ' + st.total + ' results shown</span></div>' : '');
+  target.innerHTML = cards + more;
+  const btn = target.querySelector('.load-more-btn');
+  if (btn) btn.addEventListener('click', () => loadMore(targetId));
+  target.querySelectorAll('.context-link').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const idx = parseInt(a.dataset.idx, 10);
+      const result = searchState[a.dataset.target].results[idx];
+      if (result) showContext(result);
+    });
+  });
+}
+
+async function doSearch(query, targetId, pageSize) {
   if (!query.trim()) return;
+  const limit = pageSize || PAGE_SIZE;
   const target = document.getElementById(targetId);
   target.innerHTML = '<div class="loading">Searching...</div>';
   try {
     const r = await fetch(API + '/api/search', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query, top_k: 8})
+      body: JSON.stringify({query, top_k: limit, offset: 0})
     });
     const d = await r.json();
     if (d.error) {
       target.innerHTML = '<div class="empty">' + escHtml(d.error) + '</div>';
       return;
     }
-    if (!d.results || d.results.length === 0) {
-      target.innerHTML = '<div class="empty">No results found.</div>';
-      return;
-    }
-    target.innerHTML = d.results.map(r =>
-      '<div class="result">' +
-        '<div class="meta"><span>' + escHtml(r.source) + '</span><span class="score">' + r.score.toFixed(3) + '</span></div>' +
-        '<div class="text">' + escHtml(r.text) + '</div>' +
-      '</div>'
-    ).join('');
+    searchState[targetId] = {
+      query,
+      pageSize: limit,
+      results: d.results || [],
+      total: d.total || 0,
+    };
+    renderResults(targetId, false);
   } catch (e) {
     target.innerHTML = '<div class="empty">Search failed: ' + escHtml(e.message) + '</div>';
   }
 }
 
-document.getElementById('dash-search').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doSearch(e.target.value, 'dash-results');
-});
-document.getElementById('search-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doSearch(e.target.value, 'search-results');
-});
-
-async function loadDocuments() {
-  const target = document.getElementById('doc-list');
+async function loadMore(targetId) {
+  const st = searchState[targetId];
+  if (!st) return;
+  const target = document.getElementById(targetId);
+  const wrap = target.querySelector('.load-more-wrap');
+  if (wrap) wrap.innerHTML = '<span class="load-more-info">Loading...</span>';
   try {
-    const r = await fetch(API + '/api/sources');
+    const r = await fetch(API + '/api/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query: st.query, top_k: st.pageSize, offset: st.results.length})
+    });
     const d = await r.json();
-    if (!d.sources || d.sources.length === 0) {
-      target.innerHTML = '<div class="empty">No documents ingested yet.<br>Use <code>satchel ingest &lt;path&gt;</code> to add files.</div>';
+    if (d.error) {
+      if (wrap) wrap.innerHTML = '<span class="load-more-info" style="color:var(--error)">' + escHtml(d.error) + '</span>';
       return;
     }
-    const rows = d.sources.map(s => {
-      const ext = s.file_type || '?';
-      const badgeCls = 'badge ' + ext;
-      return '<tr><td><span class="' + badgeCls + '">' + ext + '</span></td><td>' + escHtml(s.path) + '</td><td>' + s.chunk_count + '</td><td>' + escHtml(s.ingested_at || '-') + '</td></tr>';
-    }).join('');
-    target.innerHTML = '<table class="doc-table"><thead><tr><th>Type</th><th>Source</th><th>Chunks</th><th>Ingested</th></tr></thead><tbody>' + rows + '</tbody></table>';
-  } catch {
-    target.innerHTML = '<div class="empty">Failed to load documents.</div>';
+    st.results = st.results.concat(d.results || []);
+    st.total = d.total || st.total;
+    renderResults(targetId, true);
+  } catch (e) {
+    if (wrap) wrap.innerHTML = '<span class="load-more-info" style="color:var(--error)">' + escHtml(e.message) + '</span>';
   }
 }
+
+document.getElementById('dash-search').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch(e.target.value, 'dash-results', DASH_PAGE_SIZE);
+});
+document.getElementById('search-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch(e.target.value, 'search-results', PAGE_SIZE);
+});
+
+const DOC_PAGE = 50;
+const docState = { q: '', type: '', sort: 'name', sources: [], total: 0, types: [] };
+let docTimer = null;
+
+function renderDocs() {
+  const target = document.getElementById('doc-list');
+  const summary = document.getElementById('doc-summary');
+  if (!docState.sources.length) {
+    target.innerHTML = '<div class="empty">No documents match.<br>Use <code>satchel ingest &lt;path&gt;</code> or the Ingest tab to add files.</div>';
+    summary.textContent = '';
+    return;
+  }
+  summary.textContent =
+    'Showing ' + docState.sources.length + ' of ' + docState.total + ' source path' +
+    (docState.total === 1 ? '' : 's') +
+    (docState.q ? ' matching "' + docState.q + '"' : '');
+  const rows = docState.sources.map(s => {
+    const ext = s.file_type || '?';
+    const badgeCls = 'badge ' + ext;
+    const recordsCell = s.record_count > 1
+      ? '<b>' + s.record_count + '</b> records'
+      : '1 record';
+    return '<tr>' +
+      '<td><span class="' + badgeCls + '">' + escHtml(ext) + '</span></td>' +
+      '<td>' + escHtml(s.path) + '</td>' +
+      '<td>' + recordsCell + '</td>' +
+      '<td>' + s.chunk_count + '</td>' +
+      '<td>' + escHtml(s.ingested_at || '-') + '</td>' +
+    '</tr>';
+  }).join('');
+  const more = docState.sources.length < docState.total
+    ? '<div class="load-more-wrap"><span class="load-more-info">' +
+        docState.sources.length + ' / ' + docState.total +
+      '</span><button class="load-more-btn" id="doc-load-more">Load more</button></div>'
+    : '';
+  target.innerHTML = '<table class="doc-table"><thead><tr>' +
+    '<th>Type</th><th>Source</th><th>Records</th><th>Chunks</th><th>Ingested</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>' + more;
+  const btn = document.getElementById('doc-load-more');
+  if (btn) btn.addEventListener('click', loadMoreDocs);
+}
+
+async function fetchDocPage(offset) {
+  const params = new URLSearchParams();
+  params.set('limit', DOC_PAGE);
+  params.set('offset', offset);
+  if (docState.q) params.set('q', docState.q);
+  if (docState.type) params.set('filter_type', docState.type);
+  params.set('sort_by', docState.sort);
+  const r = await fetch(API + '/api/sources?' + params.toString());
+  return r.json();
+}
+
+async function loadDocuments() {
+  document.getElementById('doc-list').innerHTML = '<div class="loading">Loading documents...</div>';
+  try {
+    const d = await fetchDocPage(0);
+    if (d.error) {
+      document.getElementById('doc-list').innerHTML = '<div class="empty">' + escHtml(d.error) + '</div>';
+      return;
+    }
+    docState.sources = d.sources || [];
+    docState.total = d.total || 0;
+    populateTypeOptions();
+    renderDocs();
+  } catch (e) {
+    document.getElementById('doc-list').innerHTML = '<div class="empty">Failed to load documents.</div>';
+  }
+}
+
+async function loadMoreDocs() {
+  try {
+    const d = await fetchDocPage(docState.sources.length);
+    if (d.error) return;
+    docState.sources = docState.sources.concat(d.sources || []);
+    docState.total = d.total || docState.total;
+    renderDocs();
+  } catch (e) {}
+}
+
+async function populateTypeOptions() {
+  // Probe: count distinct file_types via a single call asking only the first
+  // page sorted by chunks. Cheap heuristic — we infer from the first page
+  // plus what we already accumulated. For exhaustive accuracy a /api/types
+  // endpoint would be cleaner; fine for now.
+  const seen = new Set(['']);
+  for (const s of docState.sources) {
+    if (s.file_type) seen.add(s.file_type);
+  }
+  const sel = document.getElementById('doc-type');
+  const current = sel.value;
+  const types = Array.from(seen).sort();
+  // Only update if changed to avoid losing focus.
+  if (sel.children.length - 1 !== types.length - 1) {
+    sel.innerHTML = '<option value="">All types</option>' +
+      types.filter(t => t).map(t => '<option value="' + t + '">' + escHtml(t) + '</option>').join('');
+    sel.value = current;
+  }
+}
+
+function debouncedReload() {
+  if (docTimer) clearTimeout(docTimer);
+  docTimer = setTimeout(loadDocuments, 250);
+}
+
+document.getElementById('doc-q').addEventListener('input', e => {
+  docState.q = e.target.value.trim();
+  debouncedReload();
+});
+document.getElementById('doc-type').addEventListener('change', e => {
+  docState.type = e.target.value;
+  loadDocuments();
+});
+document.getElementById('doc-sort').addEventListener('change', e => {
+  docState.sort = e.target.value;
+  loadDocuments();
+});
 
 const configs = {
   'claude-desktop': {
@@ -424,7 +640,7 @@ async function runIngest() {
     return;
   }
   status.className = 'ingest-status';
-  status.textContent = 'Ingesting ' + path + '... (this can take a while for large archives)';
+  status.textContent = 'Queuing job for ' + path + '...';
   try {
     const r = await fetch(API + '/api/ingest', {
       method: 'POST',
@@ -437,13 +653,99 @@ async function runIngest() {
       status.textContent = 'Failed: ' + d.error;
     } else {
       status.className = 'ingest-status ok';
-      status.textContent = 'Done. Vault now has ' + d.documents + ' documents, ' + d.chunks + ' chunks.';
-      checkStatus();
+      status.textContent = 'Job queued. Track progress below.';
+      document.getElementById('ingest-path').value = '';
+      kickJobsPolling();
     }
   } catch (e) {
     status.className = 'ingest-status err';
     status.textContent = 'Network error: ' + e.message;
   }
+}
+
+// ----- Jobs polling + render -----
+let jobsTimer = null;
+
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = Date.now();
+  const ms = now - d.getTime();
+  if (ms < 60_000) return Math.round(ms/1000) + 's ago';
+  if (ms < 3600_000) return Math.round(ms/60000) + 'm ago';
+  return d.toLocaleTimeString();
+}
+function fmtDuration(start, end) {
+  if (!start) return '';
+  const s = new Date(start).getTime();
+  const e = end ? new Date(end).getTime() : Date.now();
+  const sec = Math.max(0, Math.round((e - s)/1000));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec/60);
+  return m + 'm ' + (sec - m*60) + 's';
+}
+
+async function refreshJobs() {
+  try {
+    const r = await fetch(API + '/api/jobs');
+    const d = await r.json();
+    renderJobs(d.jobs || []);
+    const anyActive = (d.jobs || []).some(j => j.status === 'running' || j.status === 'pending');
+    if (anyActive) {
+      // Poll while there's active work; back off when idle.
+      if (!jobsTimer) jobsTimer = setInterval(refreshJobs, 1500);
+    } else if (jobsTimer) {
+      clearInterval(jobsTimer);
+      jobsTimer = null;
+      checkStatus(); // refresh dashboard counters once final
+    }
+  } catch (e) {
+    // Silent — don't spam the UI on transient network errors.
+  }
+}
+
+function kickJobsPolling() {
+  refreshJobs();
+  if (!jobsTimer) jobsTimer = setInterval(refreshJobs, 1500);
+}
+
+function renderJobs(jobs) {
+  const target = document.getElementById('jobs-list');
+  if (!jobs.length) {
+    target.innerHTML = '<div class="empty">No ingest jobs yet.</div>';
+    return;
+  }
+  target.innerHTML = jobs.map(j => {
+    const status = j.status;
+    const archiveBadge = j.archive_kind
+      ? '<span class="archive-tag">archive: ' + escHtml(j.archive_kind) + '</span>'
+      : '';
+    const counters = [
+      '<span><b>' + fmtNum(j.records_added) + '</b> added</span>',
+      '<span><b>' + fmtNum(j.records_skipped) + '</b> skipped</span>',
+      j.records_failed ? '<span><b>' + fmtNum(j.records_failed) + '</b> failed</span>' : '',
+      '<span><b>' + fmtNum(j.files_seen) + '</b> seen</span>',
+    ].filter(Boolean).join('');
+    const time = (status === 'running' || status === 'pending')
+      ? '<span>elapsed: <b>' + fmtDuration(j.started_at, null) + '</b></span>'
+      : '<span>took <b>' + fmtDuration(j.started_at, j.finished_at) + '</b> · finished ' + fmtTime(j.finished_at) + '</span>';
+    const current = (j.current_file && (status === 'running' || status === 'pending'))
+      ? '<div class="job-current">→ ' + escHtml(j.current_file) + '</div>'
+      : '';
+    const err = j.error ? '<div class="job-error">' + escHtml(j.error) + '</div>' : '';
+    const bar = (status === 'running' || status === 'pending')
+      ? '<div class="job-bar"><div class="job-bar-fill"></div></div>'
+      : '';
+    return '<div class="job">' +
+      '<div class="job-head">' +
+        '<div class="job-path">' + escHtml(j.path) + '</div>' +
+        '<span class="job-status ' + status + '">' + status + '</span>' +
+      '</div>' +
+      '<div class="job-meta">' + counters + archiveBadge + time + '</div>' +
+      current + err + bar +
+    '</div>';
+  }).join('');
 }
 document.getElementById('ingest-go-btn').addEventListener('click', runIngest);
 document.getElementById('ingest-path').addEventListener('keydown', e => { if (e.key === 'Enter') runIngest(); });
@@ -478,7 +780,14 @@ async function loadBrowse(path) {
   ).join('');
   list.querySelectorAll('.entry').forEach(el => {
     el.addEventListener('click', () => {
-      if (el.dataset.kind === 'dir') loadBrowse(el.dataset.path);
+      if (el.dataset.kind === 'dir') {
+        loadBrowse(el.dataset.path);
+      } else {
+        // Pick this file directly. Useful for single-file archives like an
+        // mbox or _chat.txt.
+        document.getElementById('ingest-path').value = el.dataset.path;
+        modal.style.display = 'none';
+      }
     });
   });
 }
@@ -601,8 +910,52 @@ document.getElementById('manage-clear').addEventListener('click', async () => {
   }
 });
 
+// ----- Context modal -----
+const contextModal = document.getElementById('context-modal');
+async function showContext(result) {
+  contextModal.style.display = 'flex';
+  document.getElementById('context-source').textContent = result.source;
+  const list = document.getElementById('context-list');
+  list.innerHTML = '<div class="loading">Loading conversation...</div>';
+  try {
+    const r = await fetch(API + '/api/conversation?source=' + encodeURIComponent(result.source) + '&limit=2000');
+    const d = await r.json();
+    if (d.error) {
+      list.innerHTML = '<div class="empty">' + escHtml(d.error) + '</div>';
+      return;
+    }
+    const records = d.records || [];
+    if (records.length === 0) {
+      list.innerHTML = '<div class="empty">No records at this source.</div>';
+      return;
+    }
+    // Mark the matching record by exact text equality (chunk text is the
+    // canonical body we persisted, so this is reliable).
+    const matchText = result.text;
+    let matchIdx = -1;
+    list.innerHTML = records.map((rec, i) => {
+      const isMatch = rec.text === matchText;
+      if (isMatch && matchIdx < 0) matchIdx = i;
+      return '<div class="context-msg' + (isMatch ? ' match' : '') + '" data-i="' + i + '">' +
+        (rec.title ? '<span class="ctx-title">' + escHtml(rec.title) + '</span>' : '') +
+        escHtml(rec.text) +
+      '</div>';
+    }).join('');
+    // Scroll the matching message into view inside the modal.
+    if (matchIdx >= 0) {
+      const el = list.querySelector('[data-i="' + matchIdx + '"]');
+      if (el) el.scrollIntoView({block: 'center'});
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Failed to load: ' + escHtml(e.message) + '</div>';
+  }
+}
+document.getElementById('context-close').addEventListener('click', () => contextModal.style.display = 'none');
+contextModal.addEventListener('click', e => { if (e.target === contextModal) contextModal.style.display = 'none'; });
+
 checkStatus();
 showConfig('claude-desktop');
+refreshJobs();
 setInterval(checkStatus, 30000);
 </script>
 </body>

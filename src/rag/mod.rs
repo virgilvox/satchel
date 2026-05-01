@@ -16,11 +16,46 @@ pub struct SearchResult {
     pub tags: Vec<String>,
 }
 
+/// A page of search results plus the total match count, so the UI can
+/// render "Showing N of M" and a Load More button.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchPage {
+    pub results: Vec<SearchResult>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct SourceInfo {
     pub path: String,
     pub file_type: String,
+    /// Number of underlying `documents` rows at this `source_path`. For most
+    /// files it's 1; for archive sources where the handler emits one record
+    /// per logical message (Slack daily JSONs, mbox files), it's >1.
+    pub record_count: usize,
     pub chunk_count: usize,
+    pub ingested_at: String,
+}
+
+/// A page of grouped sources plus total count, for UI pagination.
+#[derive(Debug, serde::Serialize)]
+pub struct SourcesPage {
+    pub sources: Vec<SourceInfo>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// One record at a given source_path, suitable for "show conversation context"
+/// rendering. Records are returned in ingest order — for archive sources whose
+/// handlers walk messages chronologically (Slack, Discord, mbox), this yields
+/// chronological listing.
+#[derive(Debug, serde::Serialize)]
+pub struct ConversationRecord {
+    pub id: String,
+    pub title: Option<String>,
+    pub text: String,
     pub ingested_at: String,
 }
 
@@ -179,9 +214,8 @@ impl Database {
     }
 
     /// Hybrid retrieval: dense (cosine over embeddings) + sparse (BM25 over FTS5),
-    /// fused via Reciprocal Rank Fusion. The dense leg pulls top RRF_CANDIDATES
-    /// by cosine; the sparse leg pulls top RRF_CANDIDATES by BM25; ranks are
-    /// combined per chunk as `Σ 1/(RRF_K + rank_i)` and the top_k winners returned.
+    /// fused via Reciprocal Rank Fusion. Returns a [`SearchPage`] so the UI can
+    /// paginate through long result lists; `offset` is 0 for the first page.
     ///
     /// `query_text` is what FTS5 tokenizes for keyword matching. Pass the same
     /// natural-language string the user typed; do not pre-tokenize.
@@ -189,10 +223,11 @@ impl Database {
         &self,
         query_embedding: &[f32],
         query_text: &str,
-        top_k: usize,
+        limit: usize,
+        offset: usize,
         filter_source: Option<&str>,
         filter_tags: Option<&[&str]>,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<SearchPage> {
         let conn = self.conn.lock().unwrap();
 
         let mut by_chunk: std::collections::HashMap<String, FusedRow> =
@@ -336,58 +371,150 @@ impl Database {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        fused.truncate(top_k);
 
-        Ok(fused)
+        let total = fused.len();
+        let start = offset.min(total);
+        let end = (offset + limit).min(total);
+        let page = fused[start..end].to_vec();
+
+        Ok(SearchPage {
+            results: page,
+            total,
+            offset,
+            limit,
+        })
     }
 
+    /// List sources grouped by `source_path`. Each row aggregates all
+    /// documents at that path so an archive (e.g. a Slack daily file with
+    /// 50 messages) shows as one entry with `record_count=50`, not 50 rows.
+    ///
+    /// `filter_path` is a substring match (LIKE %q%, with %/_ in `q` escaped).
+    /// Pass `limit = usize::MAX` to disable pagination.
     pub fn list_sources(
         &self,
         filter_type: Option<&str>,
+        filter_path: Option<&str>,
         sort_by: &str,
-    ) -> Result<Vec<SourceInfo>> {
+        limit: usize,
+        offset: usize,
+    ) -> Result<SourcesPage> {
         let conn = self.conn.lock().unwrap();
+        let path_like = filter_path
+            .filter(|s| !s.is_empty())
+            .map(|q| format!("%{}%", escape_like(q)));
+
+        let mut where_parts: Vec<&'static str> = Vec::new();
+        if filter_type.is_some() {
+            where_parts.push("d.file_type = ?");
+        }
+        if path_like.is_some() {
+            where_parts.push(r"d.source_path LIKE ? ESCAPE '\'");
+        }
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_parts.join(" AND "))
+        };
         let order = match sort_by {
-            "date" => "d.ingested_at DESC",
+            "date" => "MAX(d.ingested_at) DESC",
             "chunks" => "chunk_count DESC",
+            "records" => "record_count DESC",
             _ => "d.source_path ASC",
         };
 
-        let sql = format!(
-            "SELECT d.source_path, d.file_type, COUNT(c.id) as chunk_count, d.ingested_at
+        // Total: count of distinct source_paths after WHERE.
+        let total_sql = format!(
+            "SELECT COUNT(DISTINCT d.source_path) FROM documents d {where_clause}"
+        );
+        // Build the param list. Note that `filter_type: Option<&str>` borrows
+        // for the function lifetime, so casting through a String avoids the
+        // "doesn't live long enough" trap when passing &dyn ToSql later.
+        let ft_owned: Option<String> = filter_type.map(String::from);
+        let mut filter_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        if let Some(ft) = &ft_owned {
+            filter_params.push(ft as &dyn rusqlite::ToSql);
+        }
+        if let Some(p) = &path_like {
+            filter_params.push(p as &dyn rusqlite::ToSql);
+        }
+        let total: i64 = conn.query_row(
+            &total_sql,
+            rusqlite::params_from_iter(filter_params.iter().copied()),
+            |r| r.get(0),
+        )?;
+
+        let page_sql = format!(
+            "SELECT
+                d.source_path,
+                MIN(d.file_type) AS file_type,
+                COUNT(DISTINCT d.id) AS record_count,
+                COUNT(c.id) AS chunk_count,
+                MAX(d.ingested_at) AS ingested_at
              FROM documents d
              LEFT JOIN chunks c ON c.document_id = d.id
-             {} GROUP BY d.id ORDER BY {}",
-            if filter_type.is_some() {
-                "WHERE d.file_type = ?1"
-            } else {
-                ""
-            },
-            order
+             {where_clause}
+             GROUP BY d.source_path
+             ORDER BY {order}
+             LIMIT ? OFFSET ?"
         );
+        let limit_sql = limit as i64;
+        let offset_sql = offset as i64;
+        let mut all_params = filter_params.clone();
+        all_params.push(&limit_sql);
+        all_params.push(&offset_sql);
 
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare(&page_sql)?;
+        let sources: Vec<SourceInfo> = stmt
+            .query_map(rusqlite::params_from_iter(all_params.iter().copied()), |row| {
+                Ok(SourceInfo {
+                    path: row.get(0)?,
+                    file_type: row.get(1)?,
+                    record_count: row.get::<_, i64>(2)? as usize,
+                    chunk_count: row.get::<_, i64>(3)? as usize,
+                    ingested_at: row.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
-        fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceInfo> {
-            Ok(SourceInfo {
-                path: row.get(0)?,
-                file_type: row.get(1)?,
-                chunk_count: row.get::<_, i64>(2)? as usize,
-                ingested_at: row.get(3)?,
-            })
-        }
+        Ok(SourcesPage {
+            sources,
+            total: total as usize,
+            offset,
+            limit,
+        })
+    }
 
-        let results: Vec<SourceInfo> = if let Some(ft) = filter_type {
-            stmt.query_map(params![ft], map_row)?
-                .filter_map(|r| r.ok())
-                .collect()
-        } else {
-            stmt.query_map([], map_row)?
-                .filter_map(|r| r.ok())
-                .collect()
-        };
-
-        Ok(results)
+    /// Return all records (documents) at `source_path` in ingest order. For
+    /// archive handlers that walk source files chronologically, this is the
+    /// chronological message list — useful for showing context around a
+    /// search hit. Capped at `limit` to avoid runaway responses.
+    pub fn list_records_by_source(
+        &self,
+        source: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.title, d.raw_text, d.ingested_at
+             FROM documents d
+             WHERE d.source_path = ?1
+             ORDER BY d.rowid ASC
+             LIMIT ?2",
+        )?;
+        let records: Vec<ConversationRecord> = stmt
+            .query_map(params![source, limit as i64], |row| {
+                Ok(ConversationRecord {
+                    id: row.get(0)?,
+                    title: row.get::<_, Option<String>>(1)?,
+                    text: row.get(2)?,
+                    ingested_at: row.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(records)
     }
 
     pub fn get_full_document(&self, source: &str) -> Result<String> {
@@ -856,11 +983,12 @@ mod tests {
             .unwrap();
 
         let query = vec![1.0, 0.0, 0.0];
-        let results = db.search(&query, "chunk text", 5, None, None).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].text, "chunk text");
+        let page = db.search(&query, "chunk text", 5, 0, None, None).unwrap();
+        assert_eq!(page.results.len(), 1);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.results[0].text, "chunk text");
         // RRF score: hit by dense + sparse, both at rank 0 → 2 * 1/(60+1) ≈ 0.0328
-        assert!(results[0].score > 0.0);
+        assert!(page.results[0].score > 0.0);
 
         cleanup(&dir);
     }
@@ -891,12 +1019,15 @@ mod tests {
         db.insert_document("d2", "/b.txt", "txt", None, "b", "h2")
             .unwrap();
 
-        let all = db.list_sources(None, "name").unwrap();
-        assert_eq!(all.len(), 2);
+        let all = db.list_sources(None, None, "name", 100, 0).unwrap();
+        assert_eq!(all.sources.len(), 2);
+        assert_eq!(all.total, 2);
 
-        let md_only = db.list_sources(Some("md"), "name").unwrap();
-        assert_eq!(md_only.len(), 1);
-        assert_eq!(md_only[0].file_type, "md");
+        let md_only = db
+            .list_sources(Some("md"), None, "name", 100, 0)
+            .unwrap();
+        assert_eq!(md_only.sources.len(), 1);
+        assert_eq!(md_only.sources[0].file_type, "md");
 
         cleanup(&dir);
     }
@@ -931,11 +1062,11 @@ mod tests {
         db.insert_chunk("c2", "d2", 0, "work chunk", 5, 0, 5, &emb)
             .unwrap();
 
-        let results = db
-            .search(&emb, "notes chunk", 10, Some("/notes/"), None)
+        let page = db
+            .search(&emb, "notes chunk", 10, 0, Some("/notes/"), None)
             .unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].source.contains("/notes/"));
+        assert_eq!(page.results.len(), 1);
+        assert!(page.results[0].source.contains("/notes/"));
 
         cleanup(&dir);
     }
@@ -944,8 +1075,9 @@ mod tests {
     fn test_search_empty_database() {
         let db = Database::open_memory().unwrap();
         let query = vec![1.0, 0.0, 0.0];
-        let results = db.search(&query, "anything", 5, None, None).unwrap();
-        assert!(results.is_empty());
+        let page = db.search(&query, "anything", 5, 0, None, None).unwrap();
+        assert!(page.results.is_empty());
+        assert_eq!(page.total, 0);
     }
 
     #[test]
@@ -963,11 +1095,11 @@ mod tests {
             .unwrap();
         db.add_tag("d1", "important").unwrap();
 
-        let results = db
-            .search(&emb, "chunk", 10, None, Some(&["important"]))
+        let page = db
+            .search(&emb, "chunk", 10, 0, None, Some(&["important"]))
             .unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].source.contains("a.md"));
+        assert_eq!(page.results.len(), 1);
+        assert!(page.results[0].source.contains("a.md"));
     }
 
     #[test]
@@ -1016,8 +1148,8 @@ mod tests {
             .unwrap();
         db.insert_document("d2", "/new.md", "md", None, "b", "h2")
             .unwrap();
-        let sources = db.list_sources(None, "date").unwrap();
-        assert_eq!(sources.len(), 2);
+        let sources = db.list_sources(None, None, "date", 100, 0).unwrap();
+        assert_eq!(sources.sources.len(), 2);
     }
 
     #[test]
@@ -1060,17 +1192,62 @@ mod tests {
             .unwrap();
         }
 
-        let results = db.search(&query_emb, "lumencanvas", 5, None, None).unwrap();
+        let page = db
+            .search(&query_emb, "lumencanvas", 5, 0, None, None)
+            .unwrap();
         assert!(
-            results.iter().any(|r| r.text.contains("lumencanvas")),
+            page.results.iter().any(|r| r.text.contains("lumencanvas")),
             "lumencanvas chunk must surface in hybrid results despite zero cosine"
         );
         // Should rank #1: gets both legs (sparse rank 0 + dense rank 30); the
         // 30 dense-only chunks each get only the dense leg.
         assert!(
-            results[0].text.contains("lumencanvas"),
+            page.results[0].text.contains("lumencanvas"),
             "lumencanvas should be top-ranked due to BM25 contribution"
         );
+    }
+
+    #[test]
+    fn test_search_pagination() {
+        let db = Database::open_memory().unwrap();
+        let emb = vec![1.0, 0.0];
+        for i in 0..15 {
+            let id = format!("d{i}");
+            db.insert_document(&id, &format!("/x/{i}.md"), "md", None, "x", &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                &format!("c{i}"),
+                &id,
+                0,
+                "shared keyword content",
+                3,
+                0,
+                3,
+                &emb,
+            )
+            .unwrap();
+        }
+
+        let p1 = db.search(&emb, "shared", 5, 0, None, None).unwrap();
+        assert_eq!(p1.results.len(), 5);
+        assert_eq!(p1.total, 15);
+        assert_eq!(p1.offset, 0);
+
+        let p2 = db.search(&emb, "shared", 5, 5, None, None).unwrap();
+        assert_eq!(p2.results.len(), 5);
+        assert_eq!(p2.total, 15);
+
+        // No overlap between page 1 and page 2.
+        let p1_ids: Vec<&str> = p1.results.iter().map(|r| r.source.as_str()).collect();
+        let p2_ids: Vec<&str> = p2.results.iter().map(|r| r.source.as_str()).collect();
+        for id in &p2_ids {
+            assert!(!p1_ids.contains(id), "{id} appeared in both pages");
+        }
+
+        // Final page; offset past total returns empty without panic.
+        let p4 = db.search(&emb, "shared", 5, 100, None, None).unwrap();
+        assert!(p4.results.is_empty());
+        assert_eq!(p4.total, 15);
     }
 
     #[test]
@@ -1105,14 +1282,14 @@ mod tests {
         db.insert_chunk("tc1", "t1", 0, "target chunk", 1, 0, 12, &[0.0, 0.0, 0.5])
             .unwrap();
 
-        let results = db
-            .search(&query_emb, "target chunk", 5, Some("/target/"), None)
+        let page = db
+            .search(&query_emb, "target chunk", 5, 0, Some("/target/"), None)
             .unwrap();
         assert!(
-            !results.is_empty(),
+            !page.results.is_empty(),
             "filter_source must find the target even when it ranks deep in dense"
         );
-        assert!(results[0].source.contains("/target/"));
+        assert!(page.results[0].source.contains("/target/"));
     }
 
     #[test]
@@ -1192,9 +1369,9 @@ mod tests {
 
         let (d, _) = db.delete_by_path_prefix("/notes_2024", false).unwrap();
         assert_eq!(d, 1, "underscore must match literally, not as wildcard");
-        let remaining = db.list_sources(None, "name").unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert!(remaining[0].path.contains("notesX2024"));
+        let remaining = db.list_sources(None, None, "name", 100, 0).unwrap();
+        assert_eq!(remaining.sources.len(), 1);
+        assert!(remaining.sources[0].path.contains("notesX2024"));
     }
 
     #[test]
@@ -1207,9 +1384,9 @@ mod tests {
 
         let (d, _) = db.delete_by_path_exact("/foo_bar.md", false).unwrap();
         assert_eq!(d, 1);
-        let remaining = db.list_sources(None, "name").unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert!(remaining[0].path.contains("fooXbar"));
+        let remaining = db.list_sources(None, None, "name", 100, 0).unwrap();
+        assert_eq!(remaining.sources.len(), 1);
+        assert!(remaining.sources[0].path.contains("fooXbar"));
     }
 
     #[test]
@@ -1295,13 +1472,20 @@ mod tests {
         db.insert_chunk("c1", "d1", 0, "uniqueword12345", 1, 0, 15, &[1.0])
             .unwrap();
 
-        let results = db.search(&[1.0], "uniqueword12345", 5, None, None).unwrap();
-        assert_eq!(results.len(), 1);
+        let page = db
+            .search(&[1.0], "uniqueword12345", 5, 0, None, None)
+            .unwrap();
+        assert_eq!(page.results.len(), 1);
 
         db.delete_by_path_exact("/a.md", false).unwrap();
 
-        let results = db.search(&[1.0], "uniqueword12345", 5, None, None).unwrap();
-        assert!(results.is_empty(), "FTS entry should be removed by trigger");
+        let page = db
+            .search(&[1.0], "uniqueword12345", 5, 0, None, None)
+            .unwrap();
+        assert!(
+            page.results.is_empty(),
+            "FTS entry should be removed by trigger"
+        );
     }
 
     #[test]
@@ -1316,8 +1500,125 @@ mod tests {
         db.insert_chunk("c2", "d2", 1, "y", 5, 1, 2, &[0.2])
             .unwrap();
 
-        let sources = db.list_sources(None, "chunks").unwrap();
-        assert_eq!(sources[0].path, "/many.md");
+        let sources = db.list_sources(None, None, "chunks", 100, 0).unwrap();
+        assert_eq!(sources.sources[0].path, "/many.md");
+    }
+
+    #[test]
+    fn test_list_records_by_source_chronological() {
+        // Documents inserted in order should come back in that order, allowing
+        // the UI to show context around a search hit.
+        let db = Database::open_memory().unwrap();
+        let path = "/slack/general/2024-01-15.json";
+        for (i, body) in ["first msg", "second msg", "third msg"].iter().enumerate() {
+            db.insert_document(
+                &format!("d{i}"),
+                path,
+                "slack",
+                Some(&format!("title {i}")),
+                body,
+                &format!("h{i}"),
+            )
+            .unwrap();
+        }
+        let records = db.list_records_by_source(path, 100).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].text, "first msg");
+        assert_eq!(records[1].text, "second msg");
+        assert_eq!(records[2].text, "third msg");
+        assert_eq!(records[0].title.as_deref(), Some("title 0"));
+    }
+
+    #[test]
+    fn test_list_records_by_source_respects_limit() {
+        let db = Database::open_memory().unwrap();
+        for i in 0..10 {
+            db.insert_document(
+                &format!("d{i}"),
+                "/x.json",
+                "slack",
+                None,
+                &format!("body {i}"),
+                &format!("h{i}"),
+            )
+            .unwrap();
+        }
+        let records = db.list_records_by_source("/x.json", 3).unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn test_list_records_by_source_unknown_source_empty() {
+        let db = Database::open_memory().unwrap();
+        let records = db.list_records_by_source("/does/not/exist", 100).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_list_sources_groups_by_source_path() {
+        // After Slack-aware ingest, many documents share the same source_path
+        // (one document per message). The grouped list should collapse them
+        // into one row per file.
+        let db = Database::open_memory().unwrap();
+        let path = "/slack/general/2024-01-15.json";
+        for i in 0..50 {
+            let id = format!("d{i}");
+            db.insert_document(&id, path, "slack", None, "x", &format!("h{i}"))
+                .unwrap();
+            db.insert_chunk(
+                &format!("c{i}"),
+                &id,
+                0,
+                "msg",
+                1,
+                0,
+                3,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        }
+        let page = db.list_sources(None, None, "name", 100, 0).unwrap();
+        assert_eq!(page.sources.len(), 1, "should group 50 docs into 1 row");
+        assert_eq!(page.sources[0].record_count, 50);
+        assert_eq!(page.sources[0].chunk_count, 50);
+        assert_eq!(page.total, 1);
+    }
+
+    #[test]
+    fn test_list_sources_pagination_and_path_filter() {
+        let db = Database::open_memory().unwrap();
+        for i in 0..30 {
+            let id = format!("d{i}");
+            let path = if i < 10 {
+                format!("/notes/n{i}.md")
+            } else {
+                format!("/work/w{i}.md")
+            };
+            db.insert_document(&id, &path, "md", None, "x", &format!("h{i}"))
+                .unwrap();
+        }
+
+        let p1 = db.list_sources(None, None, "name", 10, 0).unwrap();
+        assert_eq!(p1.sources.len(), 10);
+        assert_eq!(p1.total, 30);
+
+        let p2 = db.list_sources(None, None, "name", 10, 10).unwrap();
+        assert_eq!(p2.sources.len(), 10);
+
+        let notes = db
+            .list_sources(None, Some("/notes/"), "name", 100, 0)
+            .unwrap();
+        assert_eq!(notes.total, 10);
+        assert_eq!(notes.sources.len(), 10);
+
+        // Underscore in filter must match literally.
+        let underscored = db
+            .list_sources(None, Some("/work/_"), "name", 100, 0)
+            .unwrap();
+        assert_eq!(
+            underscored.total, 0,
+            "literal '_' shouldn't act as a wildcard"
+        );
     }
 }
 

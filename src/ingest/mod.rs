@@ -8,6 +8,18 @@ use crate::embed::Embedder;
 use crate::rag::Database;
 
 pub mod archives;
+pub mod progress;
+
+pub use progress::{Progress, ProgressEvent};
+
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct IngestStats {
+    pub files_seen: usize,
+    pub records_added: usize,
+    pub records_skipped: usize,
+    pub records_failed: usize,
+    pub archive_kind: Option<String>,
+}
 
 pub struct IngestConfig {
     pub chunk_size: usize,
@@ -23,12 +35,16 @@ impl Default for IngestConfig {
     }
 }
 
-pub async fn ingest_path(
+/// Ingest a path. Synchronous CPU-bound work — call from `spawn_blocking`
+/// in async contexts. `progress` receives one event per file seen, archive
+/// detected, and record persisted/skipped/failed.
+pub fn ingest_path(
     path: &Path,
     db: &Database,
     embedder: &Embedder,
     config: &IngestConfig,
-) -> Result<()> {
+    progress: &Progress,
+) -> Result<IngestStats> {
     // Format-aware archive detection runs first. If the path matches a known
     // archive layout (Slack workspace export, ChatGPT data export, etc.) we
     // hand off to a specialized handler that emits one record per logical
@@ -39,17 +55,38 @@ pub async fn ingest_path(
             kind.name(),
             path.display()
         );
-        archives::ingest(kind, path, db, embedder)?;
-        return Ok(());
+        progress.emit(ProgressEvent::ArchiveDetected(kind.name().to_string()));
+        let astats = archives::ingest(kind, path, db, embedder, progress)?;
+        return Ok(IngestStats {
+            files_seen: astats.records_added + astats.records_skipped,
+            records_added: astats.records_added,
+            records_skipped: astats.records_skipped,
+            records_failed: astats.files_failed,
+            archive_kind: Some(kind.name().to_string()),
+        });
     }
 
-    if path.is_file() {
-        ingest_file(path, db, embedder, config)?;
-    } else if path.is_dir() {
-        let mut success = 0usize;
-        let mut skipped = 0usize;
-        let mut failed = 0usize;
+    let mut stats = IngestStats::default();
 
+    if path.is_file() {
+        progress.emit(ProgressEvent::FileStarted(path.to_path_buf()));
+        stats.files_seen += 1;
+        match ingest_file(path, db, embedder, config) {
+            Ok(true) => {
+                stats.records_added += 1;
+                progress.emit(ProgressEvent::RecordAdded);
+            }
+            Ok(false) => {
+                stats.records_skipped += 1;
+                progress.emit(ProgressEvent::RecordSkipped);
+            }
+            Err(e) => {
+                stats.records_failed += 1;
+                eprintln!("[satchel] Failed: {} - {e}", path.display());
+                progress.emit(ProgressEvent::RecordFailed);
+            }
+        }
+    } else if path.is_dir() {
         for entry in WalkDir::new(path)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -62,23 +99,33 @@ pub async fn ingest_path(
                     .unwrap_or(false)
             })
         {
+            stats.files_seen += 1;
+            progress.emit(ProgressEvent::FileStarted(entry.path().to_path_buf()));
             match ingest_file(entry.path(), db, embedder, config) {
-                Ok(true) => success += 1,
-                Ok(false) => skipped += 1,
+                Ok(true) => {
+                    stats.records_added += 1;
+                    progress.emit(ProgressEvent::RecordAdded);
+                }
+                Ok(false) => {
+                    stats.records_skipped += 1;
+                    progress.emit(ProgressEvent::RecordSkipped);
+                }
                 Err(e) => {
                     eprintln!("[satchel] Failed: {} - {e}", entry.path().display());
-                    failed += 1;
+                    stats.records_failed += 1;
+                    progress.emit(ProgressEvent::RecordFailed);
                 }
             }
         }
 
         eprintln!(
-            "[satchel] Ingestion complete: {success} added, {skipped} unchanged, {failed} failed"
+            "[satchel] Ingestion complete: {} added, {} unchanged, {} failed",
+            stats.records_added, stats.records_skipped, stats.records_failed
         );
     } else {
         anyhow::bail!("Path does not exist: {}", path.display());
     }
-    Ok(())
+    Ok(stats)
 }
 
 pub async fn watch_and_ingest(
@@ -91,7 +138,8 @@ pub async fn watch_and_ingest(
 
     eprintln!("[satchel] Watching {} for changes...", path.display());
 
-    ingest_path(path, db, embedder, config).await?;
+    let progress = Progress::noop();
+    ingest_path(path, db, embedder, config, &progress)?;
 
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
     let mut watcher = notify::recommended_watcher(tx)?;

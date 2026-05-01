@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use satchel_rag::{embed, ingest, mcp, rag, server, vault};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -11,11 +11,81 @@ use std::path::PathBuf;
     long_about = None
 )]
 struct Cli {
-    #[arg(short, long, default_value = "./vault")]
-    vault: PathBuf,
+    /// Vault directory. If omitted, uses `<binary-dir>/vault` when it exists
+    /// (USB-stick mode), otherwise the platform data directory.
+    #[arg(short, long)]
+    vault: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Resolve where SATCHEL keeps its vault when `--vault` isn't passed.
+///
+/// Order:
+/// 1. `<binary-dir>/vault/` if it exists — preserves the USB-stick deployment
+///    pattern where the binary and vault travel together.
+/// 2. Platform data directory: `~/Library/Application Support/satchel` (macOS),
+///    `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel` (Linux/BSD),
+///    `%APPDATA%/satchel` (Windows).
+/// 3. `./vault` as a final fallback if no env vars are set.
+fn default_vault_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("vault");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    platform_data_dir().unwrap_or_else(|| PathBuf::from("vault"))
+}
+
+fn platform_data_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library/Application Support/satchel"))
+    } else if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA")
+            .map(|a| PathBuf::from(a).join("satchel"))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|u| PathBuf::from(u).join("AppData/Roaming/satchel"))
+            })
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(|x| PathBuf::from(x).join("satchel"))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/satchel"))
+            })
+    }
+}
+
+/// Print a hint when a plausibly-prior vault exists somewhere other than the
+/// chosen location, so users coming from older defaults don't lose track of it.
+fn maybe_warn_legacy_vaults(chosen: &Path) {
+    let chosen_canon = chosen.canonicalize().unwrap_or_else(|_| chosen.to_path_buf());
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("vault"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join("vault"));
+    }
+    for c in candidates {
+        let canon = c.canonicalize().unwrap_or_else(|_| c.clone());
+        if canon == chosen_canon {
+            continue;
+        }
+        // Only flag if it actually looks like a SATCHEL vault.
+        if c.join("satchel.toml").exists() || c.join("vaults").is_dir() {
+            eprintln!(
+                "[satchel] Note: existing vault at {} (not in use). Launch with --vault {} to use it.",
+                c.display(),
+                c.display()
+            );
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -29,6 +99,10 @@ enum Commands {
         /// Port for HTTP transport
         #[arg(short, long, default_value_t = 7428)]
         port: u16,
+
+        /// Don't auto-open the web UI in a browser (HTTP transport only)
+        #[arg(long)]
+        no_browser: bool,
     },
 
     /// Ingest files into the active vault
@@ -112,11 +186,12 @@ enum VaultAction {
 }
 
 /// Ensure a default vault exists. Creates one if the vault directory has no vaults.
-fn ensure_default_vault(vault_path: &PathBuf) -> Result<()> {
+fn ensure_default_vault(vault_path: &Path) -> Result<()> {
     if vault::active_vault_path(vault_path).is_ok() {
         return Ok(());
     }
     eprintln!("[satchel] No vault found. Creating default vault...");
+    std::fs::create_dir_all(vault_path)?;
     vault::create_vault(vault_path, "default")?;
     Ok(())
 }
@@ -132,15 +207,22 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let vault_path = cli.vault.clone();
+    let vault_path = cli.vault.clone().unwrap_or_else(default_vault_path);
+    eprintln!("[satchel] Vault: {}", vault_path.display());
+    maybe_warn_legacy_vaults(&vault_path);
 
     let command = cli.command.unwrap_or(Commands::Serve {
         transport: "http".to_string(),
         port: 7428,
+        no_browser: false,
     });
 
     match command {
-        Commands::Serve { transport, port } => {
+        Commands::Serve {
+            transport,
+            port,
+            no_browser,
+        } => {
             ensure_default_vault(&vault_path)?;
             let vault_dir = vault::active_vault_path(&vault_path)?;
             let db = rag::Database::open(&vault_dir)?;
@@ -148,7 +230,14 @@ async fn main() -> Result<()> {
 
             match transport.as_str() {
                 "stdio" => mcp::stdio::serve(db, embedder).await?,
-                "http" | "sse" => server::serve(db, embedder, port).await?,
+                "http" | "sse" => {
+                    // Auto-open the UI when running interactively. Skip when
+                    // piped/CI (no terminal) so headless deploys don't try to
+                    // launch a browser, and when --no-browser is set.
+                    use std::io::IsTerminal;
+                    let open = !no_browser && std::io::stderr().is_terminal();
+                    server::serve(db, embedder, port, open).await?
+                }
                 other => anyhow::bail!("Unknown transport: {other}. Use 'stdio' or 'http'."),
             }
         }
@@ -171,7 +260,8 @@ async fn main() -> Result<()> {
             if watch {
                 ingest::watch_and_ingest(&path, &db, &embedder, &config).await?;
             } else {
-                ingest::ingest_path(&path, &db, &embedder, &config).await?;
+                let progress = ingest::Progress::noop();
+                ingest::ingest_path(&path, &db, &embedder, &config, &progress)?;
             }
         }
 

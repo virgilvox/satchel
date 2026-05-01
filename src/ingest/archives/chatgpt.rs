@@ -13,6 +13,7 @@ use std::path::Path;
 
 use super::{persist_record, ArchiveStats, Record};
 use crate::embed::Embedder;
+use crate::ingest::progress::Progress;
 use crate::rag::Database;
 
 pub fn detect(path: &Path) -> bool {
@@ -22,7 +23,12 @@ pub fn detect(path: &Path) -> bool {
         && path.join("message_feedback.json").is_file()
 }
 
-pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<ArchiveStats> {
+pub fn ingest(
+    path: &Path,
+    db: &Database,
+    embedder: &Embedder,
+    progress: &Progress,
+) -> Result<ArchiveStats> {
     let convo_path = path.join("conversations.json");
     let bytes = std::fs::read(&convo_path)?;
     let convos: Vec<Value> = serde_json::from_slice(&bytes)?;
@@ -57,7 +63,7 @@ pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<Archive
             title: format!("ChatGPT: {title}"),
             body,
         };
-        if persist_record(&record, "chatgpt", db, embedder)? {
+        if persist_record(&record, "chatgpt", db, embedder, progress)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

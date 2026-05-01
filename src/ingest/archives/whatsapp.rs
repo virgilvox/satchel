@@ -10,6 +10,7 @@ use std::path::Path;
 
 use super::{persist_record, ArchiveStats, Record};
 use crate::embed::Embedder;
+use crate::ingest::progress::Progress;
 use crate::rag::Database;
 
 pub fn detect(path: &Path) -> bool {
@@ -53,7 +54,12 @@ const FMTS: &[&str] = &[
     "%m/%d/%Y, %H:%M:%S",
 ];
 
-pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<ArchiveStats> {
+pub fn ingest(
+    path: &Path,
+    db: &Database,
+    embedder: &Embedder,
+    progress: &Progress,
+) -> Result<ArchiveStats> {
     let bytes = std::fs::read(path)?;
     // Strip BOM and bidi marks.
     let text = std::str::from_utf8(&bytes)?.trim_start_matches('\u{feff}');
@@ -90,7 +96,7 @@ pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<Archive
             title: format!("@{} in {chat_name} on {date}", m.sender),
             body,
         };
-        if persist_record(&record, "whatsapp", db, embedder)? {
+        if persist_record(&record, "whatsapp", db, embedder, progress)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

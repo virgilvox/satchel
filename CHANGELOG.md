@@ -1,5 +1,150 @@
 # Changelog
 
+## v0.2.1 — 2026-04-30
+
+Quality-of-life pass on top of v0.2.0.
+
+### Default vault location
+
+`./vault` is no longer the implicit default. New resolution order:
+
+1. `--vault PATH` if explicit
+2. `<binary-dir>/vault/` if it exists — preserves USB-stick deployments where
+   the binary and its vault travel together
+3. Platform data directory:
+   - macOS: `~/Library/Application Support/satchel`
+   - Linux/BSD: `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel`
+   - Windows: `%APPDATA%\satchel`
+
+The chosen path prints on first stderr line at every launch (`[satchel] Vault: ...`).
+If a probable legacy vault exists at `./vault` or `~/vault` and isn't the chosen
+one, a hint prints with the exact `--vault` flag to keep using it. Eliminates
+the foot-gun where `./vault` resolved against the shell's PWD (typically `~`)
+not the binary's directory, leaving users hunting for their data.
+
+### Slack handler — burst-bundling
+
+Consecutive messages from the same user within 90 seconds collapse into one
+chunk with continuation-line formatting (`[hh:mm]: extra text` after the
+header). Captures stream-of-consciousness sequences ("hey", "actually nvm",
+"and one more thing") as the single thought they actually are. Thread parents
+are not bundled with adjacent messages — they own their replies via the
+thread mechanism. `BURST_GAP_SECS = 90.0`.
+
+### Conversation context viewer
+
+Each search result now has a "Show context" link that opens a modal with the
+full sequence of records at that source. The matched message is highlighted
+and scrolled into view. Backed by a new endpoint:
+
+```
+GET /api/conversation?source=<path>&limit=<n>
+→ {source, records: [{id, title, text, ingested_at}], limit}
+```
+
+Records come back in ingest order, which for chronological archive handlers
+(Slack, Discord, mbox) is chronological message order. Capped at 2000
+records per response by default, 10000 max — generous enough that a single
+day's archive viewer sees everything, bounded enough to not OOM the modal.
+
+### Documents tab — grouping and pagination
+
+After v0.2.0's Slack handler started emitting one document per message, the
+Documents page was a 50,000-row table that locked up the UI. The fix:
+
+- `list_sources` now groups by `source_path` in SQL — a Slack daily file with
+  50 messages renders as one row with `record_count = 50`, not 50 rows.
+- `GET /api/sources` accepts `?q=<substring>&filter_type=&sort_by=&limit=&offset=`.
+- The Documents tab has a path-substring filter (debounced), file-type
+  dropdown, sort selector, and Load More pagination at 50 rows per page.
+- New `Records` column shows N when a single file produced multiple records.
+- Underscores and percents in the path filter are SQL-escaped (regression
+  test added).
+
+### Search pagination
+
+`POST /api/search` now accepts `offset` and returns `{results, total, offset, limit}`.
+The web UI defaults to 20 results per page and shows a Load More button until
+all matches are exhausted; "Showing N of M" stays visible. Default `top_k`
+bumped from 5 to 20; max raised from 20 to 100. MCP `search_knowledge` tool
+prepends "Showing top N of M matches" when there's a long tail.
+
+### Slack handler — no more header-only chunks
+
+Messages with no `blocks` and empty `text` fields (file shares, link unfurls,
+sticker-only messages) used to ingest as `[date #channel @user]: ` with nothing
+after the colon, drowning real content in BM25 rankings (BM25 favors short
+documents — those header-only chunks ranked first for any username query).
+Now `extract_text` falls through to legacy `attachments[]` (title/text/fallback),
+then `files[]` (title/name/mimetype), and only persists if something is found.
+
+**Cleaning up existing data**: empty records ingested before this fix remain
+in the vault. To clean: `satchel delete --prefix "<your slack export path>"`
+then re-ingest. The dedup hash makes re-ingest fast for chunks that didn't
+change.
+
+### Auto-open the web UI on launch
+
+Running `./satchel` (with no args, or `serve --transport http`) now opens the
+default browser to `http://localhost:7428` ~250 ms after the listener binds.
+Suppressed automatically when stderr is not a TTY (so `nohup`, CI, headless
+servers, and SSH-without-DISPLAY don't try to launch anything), and
+suppressed by `--no-browser` when you want to keep it quiet anyway.
+
+Cross-platform shell-out: `open` on macOS, `xdg-open` on Linux,
+`cmd /C start "" <url>` on Windows. Best-effort — failure to launch is
+logged but never fatal.
+
+### Live progress tracking for ingests
+
+Submitting an ingest used to block the HTTP request until the entire
+archive was processed. Now `POST /api/ingest` returns a `job_id` immediately
+and the UI's new **Jobs** panel shows live counters: files seen, records
+added/skipped/failed, current file, archive kind detected, elapsed time,
+and final outcome. You can queue several folders and watch them all at
+once.
+
+Internally:
+- New `Progress` callback type threaded through `ingest_path`, the archive
+  dispatcher, and every format handler. Default callers pass `Progress::noop()`.
+- New `JobRegistry` (in-memory, per-process) holds up to 100 recent jobs.
+  Older completed/failed entries roll off; active jobs are never evicted.
+- Progress events: `ArchiveDetected`, `FileStarted`, `RecordAdded`,
+  `RecordSkipped`, `RecordFailed`. The HTTP layer turns these into atomic
+  counter updates on the active `Job`.
+
+### Smaller audit fixes
+
+- `/api/browse` and `/api/ingest` now resolve `~/` against `HOME` first then
+  `USERPROFILE` so Windows users without an `HOME` env var work.
+- Jobs whose every record failed (typically: embedding model unavailable) are
+  now marked `failed` with a useful error message instead of `completed` with
+  a silent zero added.
+- The Browse modal lets you click files, not just folders — useful for
+  single-file archives (mbox, `_chat.txt`, Discord JSON exports).
+
+### New REST endpoints
+
+```
+GET    /api/jobs                 List recent ingest jobs (newest first)
+GET    /api/jobs/:id             One job's full state
+POST   /api/ingest               Now returns {job_id, status} immediately
+POST   /api/search               Now accepts {offset?} and returns {total, offset, limit}
+GET    /api/sources              Now accepts ?q=&filter_type=&sort_by=&limit=&offset=,
+                                 returns {sources, total, offset, limit}; sources
+                                 are now grouped by source_path with record_count
+GET    /api/conversation         Returns ?source=<path> records in ingest order
+```
+
+### Migration
+
+No database migration. The new endpoints are additive. The shape of the
+`POST /api/ingest` response changed from `{status, documents, chunks}` to
+`{job_id, status: "pending"}`; clients should now poll `/api/jobs/:id` for
+final counts. The CLI `satchel ingest` is unchanged.
+
+---
+
 ## v0.2.0 — 2026-04-30
 
 The "search actually works" release. Diagnosed against a 9318-chunk Slack

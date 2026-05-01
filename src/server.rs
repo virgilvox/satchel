@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
 use crate::embed::Embedder;
+use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::rag::Database;
 
@@ -19,12 +20,14 @@ const UI_HTML: &str = include_str!("../assets/ui.html");
 pub struct AppState {
     pub db: Arc<Database>,
     pub embedder: Arc<Embedder>,
+    pub jobs: Arc<JobRegistry>,
 }
 
 pub fn build_router(db: Database, embedder: Embedder) -> Router {
     let state = Arc::new(AppState {
         db: Arc::new(db),
         embedder: Arc::new(embedder),
+        jobs: Arc::new(JobRegistry::new()),
     });
 
     Router::new()
@@ -42,6 +45,9 @@ pub fn build_router(db: Database, embedder: Embedder) -> Router {
         .route("/api/config/:client", get(api_config))
         .route("/api/browse", get(api_browse))
         .route("/api/ingest", post(api_ingest))
+        .route("/api/jobs", get(api_jobs))
+        .route("/api/jobs/:id", get(api_job_get))
+        .route("/api/conversation", get(api_conversation))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -51,7 +57,12 @@ pub fn build_router(db: Database, embedder: Embedder) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(db: Database, embedder: Embedder, port: u16) -> anyhow::Result<()> {
+pub async fn serve(
+    db: Database,
+    embedder: Embedder,
+    port: u16,
+    open_in_browser: bool,
+) -> anyhow::Result<()> {
     let app = build_router(db, embedder);
 
     let addr = format!("127.0.0.1:{port}");
@@ -60,8 +71,46 @@ pub async fn serve(db: Database, embedder: Embedder, port: u16) -> anyhow::Resul
     eprintln!("[satchel] REST API:     http://{addr}/api/");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    if open_in_browser {
+        let url = format!("http://{addr}");
+        tokio::spawn(async move {
+            // Tiny delay so axum is actually accepting before the browser hits.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Err(e) = open_url(&url) {
+                eprintln!("[satchel] Could not open browser: {e}");
+            }
+        });
+    }
+
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Best-effort cross-platform browser launcher. Returns the spawn error if
+/// the helper executable wasn't found; we don't wait on the child.
+fn open_url(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut cmd = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        // The empty "" is a placeholder for the title arg `start` consumes
+        // when its first argument is quoted — guards against URLs with spaces.
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        return c
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ());
+    } else {
+        Command::new("xdg-open")
+    };
+    cmd.arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 async fn ui_handler() -> Html<&'static str> {
@@ -116,18 +165,34 @@ async fn api_status(State(state): State<Arc<AppState>>) -> Json<Value> {
 #[derive(Deserialize)]
 struct SourcesQuery {
     filter_type: Option<String>,
+    /// Substring match on source_path; SQL wildcards in `q` are escaped.
+    q: Option<String>,
+    /// "name" (default) | "date" | "chunks" | "records"
     sort_by: Option<String>,
+    /// Page size (default 50, max 1000).
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 async fn api_sources(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SourcesQuery>,
 ) -> Json<Value> {
+    let limit = q.limit.unwrap_or(50).min(1000).max(1);
+    let offset = q.offset.unwrap_or(0);
     match state.db.list_sources(
         q.filter_type.as_deref(),
+        q.q.as_deref(),
         q.sort_by.as_deref().unwrap_or("name"),
+        limit,
+        offset,
     ) {
-        Ok(sources) => Json(json!({ "sources": sources })),
+        Ok(page) => Json(json!({
+            "sources": page.sources,
+            "total": page.total,
+            "offset": page.offset,
+            "limit": page.limit,
+        })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }
@@ -135,7 +200,10 @@ async fn api_sources(
 #[derive(Deserialize)]
 struct SearchRequest {
     query: String,
+    /// Page size (default 20, capped at 100).
     top_k: Option<usize>,
+    /// Pagination offset (default 0).
+    offset: Option<usize>,
     filter_source: Option<String>,
 }
 
@@ -143,7 +211,8 @@ async fn api_search(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> Json<Value> {
-    let top_k = req.top_k.unwrap_or(5).min(20);
+    let limit = req.top_k.unwrap_or(20).min(100);
+    let offset = req.offset.unwrap_or(0);
 
     let query_embedding = match state.embedder.embed(&req.query) {
         Ok(emb) => emb,
@@ -153,11 +222,17 @@ async fn api_search(
     match state.db.search(
         &query_embedding,
         &req.query,
-        top_k,
+        limit,
+        offset,
         req.filter_source.as_deref(),
         None,
     ) {
-        Ok(results) => Json(json!({ "results": results })),
+        Ok(page) => Json(json!({
+            "results": page.results,
+            "total": page.total,
+            "offset": page.offset,
+            "limit": page.limit,
+        })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }
@@ -254,29 +329,34 @@ struct BrowseQuery {
     path: Option<String>,
 }
 
+/// Resolve the user's home directory across platforms. Prefers `$HOME`
+/// (set on macOS/Linux and on Windows when running under msys/cygwin),
+/// falls back to `%USERPROFILE%` on native Windows.
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
 async fn api_browse(Query(q): Query<BrowseQuery>) -> Json<Value> {
     use std::path::PathBuf;
     let start: PathBuf = match q.path.as_deref() {
         Some(p) if !p.is_empty() => {
-            // Expand leading "~/" to home dir; otherwise treat as absolute.
             if let Some(stripped) = p.strip_prefix("~/") {
-                match std::env::var_os("HOME") {
-                    Some(h) => PathBuf::from(h).join(stripped),
-                    None => return Json(json!({ "error": "HOME not set" })),
+                match home_dir() {
+                    Some(h) => h.join(stripped),
+                    None => return Json(json!({ "error": "could not resolve home directory" })),
                 }
             } else if p == "~" {
-                match std::env::var_os("HOME") {
-                    Some(h) => PathBuf::from(h),
-                    None => return Json(json!({ "error": "HOME not set" })),
+                match home_dir() {
+                    Some(h) => h,
+                    None => return Json(json!({ "error": "could not resolve home directory" })),
                 }
             } else {
                 PathBuf::from(p)
             }
         }
-        _ => match std::env::var_os("HOME") {
-            Some(h) => PathBuf::from(h),
-            None => PathBuf::from("/"),
-        },
+        _ => home_dir().unwrap_or_else(|| PathBuf::from("/")),
     };
 
     if !start.exists() {
@@ -342,9 +422,14 @@ async fn api_ingest(
     use std::path::PathBuf;
     let raw = req.path.trim();
     let path: PathBuf = if let Some(stripped) = raw.strip_prefix("~/") {
-        match std::env::var_os("HOME") {
-            Some(h) => PathBuf::from(h).join(stripped),
-            None => return Json(json!({ "error": "HOME not set" })),
+        match home_dir() {
+            Some(h) => h.join(stripped),
+            None => return Json(json!({ "error": "could not resolve home directory" })),
+        }
+    } else if raw == "~" {
+        match home_dir() {
+            Some(h) => h,
+            None => return Json(json!({ "error": "could not resolve home directory" })),
         }
     } else {
         PathBuf::from(raw)
@@ -359,33 +444,105 @@ async fn api_ingest(
         chunk_overlap: req.chunk_overlap.unwrap_or(64),
     };
 
-    // Run on a blocking thread — ingestion is sync I/O + CPU-bound embedding.
+    // Register the job and return its id immediately. The actual ingest
+    // runs in the background; the UI polls /api/jobs for live counters.
+    let job_id = state.jobs.create(path.to_string_lossy().to_string());
+
     let db = state.db.clone();
     let embedder = state.embedder.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::try_current().ok();
-        if let Some(handle) = rt {
-            handle.block_on(crate::ingest::ingest_path(&path, &db, &embedder, &config))
-        } else {
-            // Fallback: build a small runtime.
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(crate::ingest::ingest_path(&path, &db, &embedder, &config))
-        }
-    })
-    .await;
+    let jobs = state.jobs.clone();
+    let job_for_progress = job_id.clone();
+    let job_for_finish = job_id.clone();
 
-    match result {
-        Ok(Ok(())) => match state.db.stats() {
-            Ok(s) => Json(json!({
-                "status": "ok",
-                "documents": s.document_count,
-                "chunks": s.chunk_count,
-            })),
-            Err(e) => Json(json!({ "error": e.to_string() })),
-        },
-        Ok(Err(e)) => Json(json!({ "error": e.to_string() })),
-        Err(e) => Json(json!({ "error": format!("join error: {e}") })),
+    tokio::task::spawn_blocking(move || {
+        jobs.update(&job_for_progress, |j| j.status = JobStatus::Running);
+        let progress_jobs = jobs.clone();
+        let progress_id = job_for_progress.clone();
+        let progress = crate::ingest::Progress::callback(move |evt| {
+            use crate::ingest::ProgressEvent;
+            progress_jobs.update(&progress_id, |j| match evt {
+                ProgressEvent::ArchiveDetected(name) => {
+                    j.archive_kind = Some(name);
+                }
+                ProgressEvent::FileStarted(p) => {
+                    j.files_seen += 1;
+                    j.current_file = Some(p.to_string_lossy().to_string());
+                }
+                ProgressEvent::RecordAdded => {
+                    j.records_added += 1;
+                }
+                ProgressEvent::RecordSkipped => {
+                    j.records_skipped += 1;
+                }
+                ProgressEvent::RecordFailed => {
+                    j.records_failed += 1;
+                }
+            });
+        });
+
+        let result = crate::ingest::ingest_path(&path, &db, &embedder, &config, &progress);
+
+        jobs.update(&job_for_finish, |j| {
+            j.current_file = None;
+            j.finished_at = Some(chrono::Utc::now().to_rfc3339());
+            match &result {
+                Ok(_) => {
+                    // If every record failed (e.g. embedder unavailable), the
+                    // pipeline returns Ok overall but the job is effectively a
+                    // failure from the user's POV. Mark accordingly.
+                    if j.records_added == 0 && j.records_failed > 0 {
+                        j.status = JobStatus::Failed;
+                        j.error = Some(format!(
+                            "all {} records failed (check embedding model availability)",
+                            j.records_failed
+                        ));
+                    } else {
+                        j.status = JobStatus::Completed;
+                    }
+                }
+                Err(e) => {
+                    j.status = JobStatus::Failed;
+                    j.error = Some(e.to_string());
+                }
+            }
+        });
+    });
+
+    Json(json!({ "job_id": job_id, "status": "pending" }))
+}
+
+async fn api_jobs(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "jobs": state.jobs.list() }))
+}
+
+#[derive(Deserialize)]
+struct ConversationQuery {
+    source: String,
+    limit: Option<usize>,
+}
+
+async fn api_conversation(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConversationQuery>,
+) -> Json<Value> {
+    let limit = q.limit.unwrap_or(2000).min(10_000);
+    match state.db.list_records_by_source(&q.source, limit) {
+        Ok(records) => Json(json!({
+            "source": q.source,
+            "records": records,
+            "limit": limit,
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_job_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    match state.jobs.get(&id) {
+        Some(j) => Json(json!({ "job": j })),
+        None => Json(json!({ "error": format!("job not found: {id}") })),
     }
 }
 

@@ -22,7 +22,9 @@ unzip satchel-macos-aarch64.zip
 ./satchel-macos-aarch64
 ```
 
-This starts the web UI at [http://localhost:7428](http://localhost:7428). A default vault is created automatically on first run. On macOS, the first launch may be blocked by Gatekeeper — right-click the binary in Finder and choose "Open" once to allow it.
+This starts the web UI at [http://localhost:7428](http://localhost:7428) and opens it in your default browser. A default vault is created automatically on first run. On macOS, the first launch may be blocked by Gatekeeper — right-click the binary in Finder and choose "Open" once to allow it.
+
+Pass `--no-browser` (or run from a non-interactive shell) to suppress the auto-open.
 
 **3. Ingest your documents** — paste a path into the Ingest tab in the UI, or from the CLI:
 
@@ -93,7 +95,7 @@ Running `./satchel` with no arguments starts the web interface at [http://localh
 - **Dashboard** — vault stats, quick search.
 - **Documents** — browse ingested files.
 - **Search** — full hybrid retrieval with score ranking.
-- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected.
+- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. Multiple folders can run concurrently and progress is tracked live (files seen, records added/skipped/failed, current file, elapsed time).
 - **Manage** — delete documents by path prefix or file type, or wipe the vault.
 - **Connect** — config snippets for every supported AI client.
 
@@ -191,7 +193,9 @@ POST   /api/search              Hybrid search  {"query": "...", "top_k": 5}
 GET    /api/document?source=... Retrieve full document text
 GET    /api/tags                List all tags
 GET    /api/browse?path=...     Server-side directory listing
-POST   /api/ingest              Ingest a path  {"path": "..."}
+POST   /api/ingest              Queue an ingest job  {"path": "..."} → {"job_id"}
+GET    /api/jobs                List recent ingest jobs (newest first)
+GET    /api/jobs/:id            One job's full state and live counters
 POST   /api/clear               Wipe vault (requires {"confirm": true})
 POST   /mcp                     MCP Streamable HTTP endpoint
 ```

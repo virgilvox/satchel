@@ -13,6 +13,7 @@ use std::path::Path;
 
 use super::{persist_record, ArchiveStats, Record};
 use crate::embed::Embedder;
+use crate::ingest::progress::Progress;
 use crate::rag::Database;
 
 pub fn detect(path: &Path) -> bool {
@@ -39,7 +40,12 @@ pub fn detect(path: &Path) -> bool {
     s.starts_with("From ")
 }
 
-pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<ArchiveStats> {
+pub fn ingest(
+    path: &Path,
+    db: &Database,
+    embedder: &Embedder,
+    progress: &Progress,
+) -> Result<ArchiveStats> {
     let bytes = std::fs::read(path)?;
     let raw = std::str::from_utf8(&bytes).unwrap_or("");
     let messages = split_mbox(raw);
@@ -119,7 +125,7 @@ pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<Archive
             title,
             body,
         };
-        if persist_record(&record, "mbox", db, embedder)? {
+        if persist_record(&record, "mbox", db, embedder, progress)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

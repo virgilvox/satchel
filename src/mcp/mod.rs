@@ -65,18 +65,30 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "list_sources",
-                "description": "List all ingested documents with metadata (file type, chunk count, ingestion date).",
+                "description": "List ingested sources grouped by source_path. Paginated; capped at 100 results per call.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "filter_type": {
                             "type": "string",
-                            "description": "Filter by file extension (e.g., 'md', 'pdf')"
+                            "description": "Filter by file_type (e.g., 'md', 'pdf', 'slack', 'mbox')"
+                        },
+                        "q": {
+                            "type": "string",
+                            "description": "Substring match on source_path"
                         },
                         "sort_by": {
                             "type": "string",
-                            "enum": ["name", "date", "chunks"],
+                            "enum": ["name", "date", "chunks", "records"],
                             "default": "name"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Page size (default 100, max 500)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Pagination offset"
                         }
                     }
                 }
@@ -185,10 +197,11 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
         Err(e) => return tool_error(&format!("Embedding error: {e}")),
     };
 
-    let results = match db.search(
+    let page = match db.search(
         &query_embedding,
         query,
         top_k,
+        0,
         filter_source,
         filter_tags.as_deref(),
     ) {
@@ -196,12 +209,19 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
         Err(e) => return tool_error(&format!("Search error: {e}")),
     };
 
-    if results.is_empty() {
+    if page.results.is_empty() {
         return tool_text("No results found.");
     }
 
     let mut text = String::new();
-    for (i, result) in results.iter().enumerate() {
+    if page.total > page.results.len() {
+        text.push_str(&format!(
+            "Showing top {} of {} matches.\n\n",
+            page.results.len(),
+            page.total
+        ));
+    }
+    for (i, result) in page.results.iter().enumerate() {
         text.push_str(&format!(
             "--- Result {} (score: {:.3}) ---\nSource: {}\n{}\n\n",
             i + 1,
@@ -216,19 +236,44 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
 
 fn handle_list_sources(args: &Value, db: &Database) -> Value {
     let filter_type = args["filter_type"].as_str();
+    let filter_path = args["q"].as_str();
     let sort_by = args["sort_by"].as_str().unwrap_or("name");
+    // Cap at 100 — beyond that the response gets unwieldy for an AI client.
+    let limit = args["limit"].as_u64().unwrap_or(100).min(500) as usize;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
 
-    match db.list_sources(filter_type, sort_by) {
-        Ok(sources) if sources.is_empty() => {
+    match db.list_sources(filter_type, filter_path, sort_by, limit, offset) {
+        Ok(page) if page.sources.is_empty() => {
             tool_text("No documents ingested yet. Use `satchel ingest <path>` to add files.")
         }
-        Ok(sources) => {
-            let text = sources
+        Ok(page) => {
+            let body = page
+                .sources
                 .iter()
-                .map(|s| format!("{} ({} chunks, .{})", s.path, s.chunk_count, s.file_type))
+                .map(|s| {
+                    if s.record_count > 1 {
+                        format!(
+                            "{} ({} records, {} chunks, .{})",
+                            s.path, s.record_count, s.chunk_count, s.file_type
+                        )
+                    } else {
+                        format!("{} ({} chunks, .{})", s.path, s.chunk_count, s.file_type)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
-            tool_text(&text)
+            let header = if page.total > page.sources.len() {
+                format!(
+                    "Showing {} of {} sources (offset={}). Pass {{\"offset\": {}}} for more.\n\n",
+                    page.sources.len(),
+                    page.total,
+                    page.offset,
+                    page.offset + page.sources.len()
+                )
+            } else {
+                String::new()
+            };
+            tool_text(&format!("{header}{body}"))
         }
         Err(e) => tool_error(&format!("Error: {e}")),
     }

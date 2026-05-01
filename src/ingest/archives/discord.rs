@@ -10,6 +10,7 @@ use std::path::Path;
 
 use super::{persist_record, ArchiveStats, Record};
 use crate::embed::Embedder;
+use crate::ingest::progress::Progress;
 use crate::rag::Database;
 
 pub fn detect(path: &Path) -> bool {
@@ -35,7 +36,12 @@ pub fn detect(path: &Path) -> bool {
     s.contains("\"guild\"") && s.contains("\"channel\"") && s.contains("\"messages\"")
 }
 
-pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<ArchiveStats> {
+pub fn ingest(
+    path: &Path,
+    db: &Database,
+    embedder: &Embedder,
+    progress: &Progress,
+) -> Result<ArchiveStats> {
     let bytes = std::fs::read(path)?;
     let v: Value = serde_json::from_slice(&bytes)?;
 
@@ -120,7 +126,7 @@ pub fn ingest(path: &Path, db: &Database, embedder: &Embedder) -> Result<Archive
             title,
             body,
         };
-        if persist_record(&record, "discord", db, embedder)? {
+        if persist_record(&record, "discord", db, embedder, progress)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

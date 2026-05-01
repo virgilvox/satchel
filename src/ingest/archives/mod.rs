@@ -16,6 +16,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::embed::Embedder;
+use crate::ingest::progress::{Progress, ProgressEvent};
 use crate::rag::Database;
 
 pub mod chatgpt;
@@ -114,25 +115,27 @@ pub fn ingest(
     path: &Path,
     db: &Database,
     embedder: &Embedder,
+    progress: &Progress,
 ) -> Result<ArchiveStats> {
     match kind {
-        ArchiveKind::Slack => slack::ingest(path, db, embedder),
-        ArchiveKind::ChatGpt => chatgpt::ingest(path, db, embedder),
-        ArchiveKind::ClaudeAi => claude_ai::ingest(path, db, embedder),
-        ArchiveKind::Discord => discord::ingest(path, db, embedder),
-        ArchiveKind::WhatsApp => whatsapp::ingest(path, db, embedder),
-        ArchiveKind::Mbox => mbox::ingest(path, db, embedder),
+        ArchiveKind::Slack => slack::ingest(path, db, embedder, progress),
+        ArchiveKind::ChatGpt => chatgpt::ingest(path, db, embedder, progress),
+        ArchiveKind::ClaudeAi => claude_ai::ingest(path, db, embedder, progress),
+        ArchiveKind::Discord => discord::ingest(path, db, embedder, progress),
+        ArchiveKind::WhatsApp => whatsapp::ingest(path, db, embedder, progress),
+        ArchiveKind::Mbox => mbox::ingest(path, db, embedder, progress),
     }
 }
 
 /// Persist a single record: insert document, embed body, insert single chunk.
 /// Skips if a document with the same source_path already exists with same
-/// record_id-derived hash.
+/// record_id-derived hash. Emits a `RecordAdded` or `RecordSkipped` event.
 pub(crate) fn persist_record(
     record: &Record,
     file_type: &str,
     db: &Database,
     embedder: &Embedder,
+    progress: &Progress,
 ) -> Result<bool> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -142,6 +145,7 @@ pub(crate) fn persist_record(
     let sha256 = format!("{:x}", hasher.finalize());
 
     if db.document_exists_by_hash(&sha256)? {
+        progress.emit(ProgressEvent::RecordSkipped);
         return Ok(false);
     }
 
@@ -166,5 +170,6 @@ pub(crate) fn persist_record(
         record.body.len(),
         &embedding.vector,
     )?;
+    progress.emit(ProgressEvent::RecordAdded);
     Ok(true)
 }
