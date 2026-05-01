@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="SATCHEL">
+  <title>SATCHEL · executable icon</title>
+  <!-- Solid amber notched-pin silhouette with line cut-outs, designed to read
+       at OS-icon sizes (16–1024 px). Transparent background so the shape
+       lifts on any window-chrome color. -->
+  <g fill="#f5b941">
+    <!-- Pin tabs -->
+    <rect x="56"  y="166" width="8" height="22"/>
+    <rect x="76"  y="166" width="8" height="22"/>
+    <rect x="96"  y="166" width="8" height="22"/>
+    <rect x="116" y="166" width="8" height="22"/>
+    <rect x="136" y="166" width="8" height="22"/>
+    <!-- Notched cartridge body -->
+    <path d="M 40 20 L 136 20 L 160 44 L 160 166 L 40 166 Z"/>
+  </g>
+  <!-- Four data lines + status dots cut into the body, matching the brand mark
+       (mid line is the white hub row; the others are mint accents). -->
+  <g>
+    <rect x="54"  y="54"  width="68" height="10" fill="#0d1117"/>
+    <rect x="124" y="54"  width="6"  height="10" fill="#5eead4"/>
+    <rect x="54"  y="84"  width="92" height="10" fill="#5eead4"/>
+    <rect x="54"  y="114" width="92" height="10" fill="#0d1117"/>
+    <rect x="54"  y="144" width="92" height="10" fill="#5eead4"/>
+    <!-- Hub centerpiece on the white-row line -->
+    <circle cx="100" cy="119" r="8"   fill="#0d1117"/>
+    <circle cx="100" cy="119" r="3.5" fill="#5eead4"/>
+  </g>
+</svg>

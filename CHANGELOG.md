@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.3 — 2026-05-01
+
+### Executable icons
+
+- Brand the binary itself: a new `assets/brand/icon.svg` (solid amber
+  notched-pin silhouette with mint data lines, designed to read at OS-icon
+  sizes) is rendered at 16/32/48/64/128/256/512/1024 px and packed into:
+  - `assets/brand/satchel.ico` — multi-resolution Windows icon, embedded
+    into the `.exe` via a new `build.rs` + the `winresource` build-dep
+    (target-gated so it only runs on Windows targets and degrades cleanly
+    on non-MSVC hosts).
+  - `assets/brand/satchel.icns` — macOS icon resource, built with
+    `iconutil` and shipped alongside the binary in the release zip
+    (a raw CLI binary cannot host an icon without a `.app` bundle).
+  - `assets/brand/icon-*.png` — multi-size PNGs for Linux `.desktop`
+    files; the 256 px variant ships as `satchel-icon.png` in the linux
+    release zips.
+- Release workflow (`.github/workflows/release.yml`) now copies the right
+  icon flavor into the per-target zip alongside the binary.
+
 ## v0.3.2 — 2026-05-01
 
 ### Audit fixes (caught by a Playwright walk-through of the rebuilt bundle)

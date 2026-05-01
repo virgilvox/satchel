@@ -1,6 +1,6 @@
 [package]
 name = "satchel-rag"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Portable RAG system on a USB drive. Single binary, local embeddings, MCP protocol."
 license = "AGPL-3.0-only"
@@ -86,3 +86,8 @@ tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 proptest = "1"
 tempfile = "3"
+
+# Windows-only: embed assets/brand/satchel.ico so the binary shows the
+# SATCHEL mark in Explorer / Task Manager. macOS and Linux skip this.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
