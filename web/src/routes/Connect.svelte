@@ -1,5 +1,6 @@
 <script lang="ts">
   import ViewHead from '../components/ViewHead.svelte';
+  import TunnelPanel from '../components/TunnelPanel.svelte';
   import { ORIGIN } from '../lib/api';
 
   type Client = 'claude-desktop' | 'claude-code' | 'cursor' | 'browser';
@@ -51,7 +52,9 @@
 </script>
 
 <ViewHead num="07" title={`CONNECT <span class="slash">/</span> AI CLIENTS`}
-  desc="SATCHEL exposes the vault over MCP. Pick a client for setup details." />
+  desc="SATCHEL exposes the vault over MCP. Run a one-click public tunnel below or pick a local client for setup details." />
+
+<TunnelPanel />
 
 <div class="tabs">
   {#each Object.entries(configs) as [key, cfg] (key)}

@@ -10,7 +10,9 @@ pub fn test_embedder() -> Embedder {
 }
 
 pub fn test_router() -> axum::Router {
-    satchel_rag::server::build_router(test_db(), test_embedder())
+    // Port 0 is a valid sentinel for "no real bind" — the tunnel UI surfaces
+    // it but tests never actually start a tunnel.
+    satchel_rag::server::build_router(test_db(), test_embedder(), 0)
 }
 
 /// Seed the database with documents and chunks for search testing.

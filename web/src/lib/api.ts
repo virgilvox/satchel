@@ -100,6 +100,19 @@ export const api = {
       '/api/clear',
       body
     ),
+
+  tunnelStatus: () => getJson<TunnelState>('/api/tunnel'),
+  tunnelStart:  () => postJson<TunnelState>('/api/tunnel/start', {}),
+  tunnelStop:   () => postJson<TunnelState>('/api/tunnel/stop', {}),
 };
+
+export interface TunnelState {
+  installed: boolean;
+  running: boolean;
+  url: string | null;
+  forwarding: string | null;
+  started_at: string | null;
+  error: string | null;
+}
 
 export const ORIGIN = API_BASE;

@@ -14,6 +14,7 @@ use crate::embed::Embedder;
 use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::rag::Database;
+use crate::tunnel::TunnelManager;
 
 // The web UI is built from `web/` (Svelte 5 + Vite) into a single
 // self-contained HTML file via `vite-plugin-singlefile`. The build artifact
@@ -25,13 +26,20 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub embedder: Arc<Embedder>,
     pub jobs: Arc<JobRegistry>,
+    pub tunnel: TunnelManager,
+    /// Port the HTTP server is bound to. The tunnel UI uses it as the
+    /// default forwarding target so the user never has to type the port
+    /// twice.
+    pub port: u16,
 }
 
-pub fn build_router(db: Database, embedder: Embedder) -> Router {
+pub fn build_router(db: Database, embedder: Embedder, port: u16) -> Router {
     let state = Arc::new(AppState {
         db: Arc::new(db),
         embedder: Arc::new(embedder),
         jobs: Arc::new(JobRegistry::new()),
+        tunnel: TunnelManager::new(),
+        port,
     });
 
     Router::new()
@@ -50,6 +58,9 @@ pub fn build_router(db: Database, embedder: Embedder) -> Router {
         .route("/api/jobs/:id", get(api_job_get))
         .route("/api/conversation", get(api_conversation))
         .route("/api/types", get(api_types))
+        .route("/api/tunnel", get(api_tunnel_status))
+        .route("/api/tunnel/start", post(api_tunnel_start))
+        .route("/api/tunnel/stop", post(api_tunnel_stop))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -65,7 +76,7 @@ pub async fn serve(
     port: u16,
     open_in_browser: bool,
 ) -> anyhow::Result<()> {
-    let app = build_router(db, embedder);
+    let app = build_router(db, embedder, port);
 
     let addr = format!("127.0.0.1:{port}");
     eprintln!("[satchel] Web UI:       http://{addr}");
@@ -635,4 +646,31 @@ async fn api_config(axum::extract::Path(client): axum::extract::Path<String>) ->
     };
 
     Json(config)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tunnel endpoints. Drive the bundled-or-PATH `cloudflared` so a one-click
+// public quick-tunnel (https://*.trycloudflare.com → http://localhost:7428)
+// is available straight from the Connect tab.
+// ─────────────────────────────────────────────────────────────────────────
+
+async fn api_tunnel_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    // Refresh `installed` on every poll — cheap (~1 fork) and lets the UI
+    // recover when the user installs cloudflared after first load.
+    let _ = state.tunnel.check_installed().await;
+    Json(json!(state.tunnel.snapshot()))
+}
+
+async fn api_tunnel_start(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match state.tunnel.start_quick(state.port).await {
+        Ok(_) => Json(json!(state.tunnel.snapshot())),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_tunnel_stop(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match state.tunnel.stop().await {
+        Ok(_) => Json(json!(state.tunnel.snapshot())),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
 }

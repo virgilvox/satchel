@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.2.0 — 2026-05-01
+
+### One-click public tunnels via bundled cloudflared
+
+A button in the Connect tab → a public `https://*.trycloudflare.com`
+URL pointing at your vault. Anonymous quick tunnels, no Cloudflare
+account needed. Works as a Custom Connector URL in claude.ai (web)
+or as the `/mcp` HTTP transport endpoint in any client outside your
+LAN.
+
+There is no native Rust client for the Cloudflare Tunnel protocol
+— the wire format is reverse-engineered Cloudflare-internal traffic
+and the reference implementation is their Go daemon `cloudflared`.
+We drive it as a child process. Two install paths:
+
+- **Release downloads bundle the per-platform `cloudflared` binary
+  next to satchel** (~35 MB extra in the zip): `Satchel.app/Contents/MacOS/cloudflared`,
+  `cloudflared` next to the Linux binary, `cloudflared.exe` next to
+  the Windows .exe. The CI workflow (`.github/workflows/release.yml`)
+  fetches each from `https://github.com/cloudflare/cloudflared/releases/latest/download/`
+  per matrix target. macOS releases come as `.tgz`; Linux/Windows are
+  raw single-file downloads. The bundled cloudflared inherits the
+  ad-hoc `codesign --deep` signature on macOS .app bundles.
+- **Source builds (`cargo install`, etc.) use whatever `cloudflared`
+  is on `$PATH`** — `brew install cloudflared` /
+  `winget install Cloudflare.cloudflared` / `apt install cloudflared`
+  / Cloudflare's deb/rpm. The UI shows install hints for each OS
+  when `cloudflared --version` fails.
+
+The tunnel manager (`src/tunnel/mod.rs`) probes
+`<satchel-binary-dir>/cloudflared` first, falls back to `$PATH`,
+spawns `cloudflared tunnel --url http://localhost:PORT --no-autoupdate
+--protocol auto` with `kill_on_drop(true)` so the subprocess dies
+with satchel, parses the trycloudflare.com URL out of stderr in a
+background tokio task, and exposes start/stop/snapshot through a
+thread-safe `Arc<Mutex<…>>`.
+
+REST surface:
+- `GET /api/tunnel` — current state + `cloudflared --version` probe
+- `POST /api/tunnel/start` — spawn child, returns immediately
+- `POST /api/tunnel/stop` — SIGTERM the child, await reap
+
+UI: a panel at the top of the Connect tab with three states —
+*not installed* (per-OS install hints), *idle* with a one-click
+START button + a clear "the URL is public" warning, and *live*
+with the public URL, the `<url>/mcp` derived endpoint, copy
+buttons, and a STOP button.
+
+Verified end-to-end on macOS: start → URL appears in ~5 s
+(`https://breaking-meyer-attractive-qualify.trycloudflare.com`),
+stop → child reaped cleanly, no zombie, no spurious "exited
+unexpectedly" error after intentional stop.
+
+### Includes everything in v1.1.1
+
+(Ask 600-char truncate fix, Ingest copy, README hero screenshots —
+see below.)
+
 ## v1.1.1 — 2026-05-01
 
 ### Ask: drop the 600-char hard truncate

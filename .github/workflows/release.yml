@@ -10,6 +10,10 @@ permissions:
 env:
   MODEL_NAME: bge-small-en-v1.5
   MODEL_URL: https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main
+  # Track Cloudflare's "latest" release. The stderr banner the tunnel
+  # manager scrapes is stable across recent versions; if it ever drifts,
+  # pin to a known-good tag here.
+  CLOUDFLARED_BASE: https://github.com/cloudflare/cloudflared/releases/latest/download
 
 jobs:
   build:
@@ -104,6 +108,15 @@ jobs:
           chmod +x ${{ matrix.artifact }}
           cp assets/brand/satchel.desktop satchel.desktop
           cp assets/brand/icon-256.png    satchel.png
+          # Bundle cloudflared next to the binary so the in-UI tunnel
+          # button "just works" out of the box. Linux releases ship the
+          # raw single-file binary directly.
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux*)  CF=cloudflared-linux-amd64 ;;
+            aarch64-unknown-linux*) CF=cloudflared-linux-arm64 ;;
+          esac
+          curl -sSL -o cloudflared "${CLOUDFLARED_BASE}/${CF}"
+          chmod +x cloudflared
 
       - name: Stage binary (macos · .app bundle)
         if: startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin')
@@ -134,20 +147,41 @@ jobs:
           </dict>
           </plist>
           PLIST
-          # Ad-hoc sign so the bundle is launchable without spurious "damaged"
-          # warnings. Doesn't bypass Gatekeeper notarization (would need a
-          # paid Developer ID), but at least the bundle has a valid signature.
+          # Bundle cloudflared INSIDE the .app's MacOS dir so the in-UI
+          # tunnel button "just works" without an external install. The
+          # tunnel manager looks here first, falls back to $PATH for
+          # source builds. macOS releases ship as .tgz — extract just
+          # the binary.
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin)  CF=cloudflared-darwin-amd64.tgz ;;
+            aarch64-apple-darwin) CF=cloudflared-darwin-arm64.tgz ;;
+          esac
+          curl -sSL -o cloudflared.tgz "${CLOUDFLARED_BASE}/${CF}"
+          tar -xzf cloudflared.tgz
+          mv cloudflared "$APP/Contents/MacOS/cloudflared"
+          chmod +x "$APP/Contents/MacOS/cloudflared"
+          rm -f cloudflared.tgz
+          # Ad-hoc sign — codesign --deep covers nested binaries too, so
+          # the bundled cloudflared inherits a valid signature. Doesn't
+          # bypass Gatekeeper notarization (would need a paid Developer
+          # ID), but the bundle is launchable.
           codesign --force --deep --sign - "$APP" || true
           # Touch so Finder picks up the icon resource.
           touch "$APP"
 
       - name: Stage binary (windows)
         if: runner.os == 'Windows'
-        run: copy target\${{ matrix.target }}\release\satchel.exe ${{ matrix.artifact }}
+        shell: pwsh
+        run: |
+          copy target\${{ matrix.target }}\release\satchel.exe ${{ matrix.artifact }}
+          # Bundle cloudflared next to satchel.exe so the in-UI tunnel
+          # button works without an external install.
+          Invoke-WebRequest -Uri "$env:CLOUDFLARED_BASE/cloudflared-windows-amd64.exe" `
+            -OutFile cloudflared.exe
 
       - name: Package zip (linux)
         if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
-        run: zip -j ${{ matrix.archive }} ${{ matrix.artifact }} satchel.desktop satchel.png
+        run: zip -j ${{ matrix.archive }} ${{ matrix.artifact }} cloudflared satchel.desktop satchel.png
 
       - name: Package zip (macos)
         if: startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin')
@@ -159,7 +193,7 @@ jobs:
       - name: Package zip (windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ${{ matrix.archive }}
+        run: Compress-Archive -Path ${{ matrix.artifact }},cloudflared.exe -DestinationPath ${{ matrix.archive }}
 
       - uses: actions/upload-artifact@v4
         with:
