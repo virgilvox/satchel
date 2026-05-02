@@ -1,5 +1,73 @@
 # Changelog
 
+## v2.3.0 — 2026-05-02
+
+### Settings modal: tabs, deep-linking, mode-aware controls
+
+The chat settings modal now opens with four tabs (CLOUD · CLAUDE / LOCAL ·
+WEBLLM / MCP / PERSISTENCE) instead of one long scroll. The tab is picked
+based on the active backend the first time the modal opens, and the
+"SET API KEY" button on the chat empty-state now deep-links straight to
+the Cloud tab. The Anthropic API key, model controls, and system prompt
+editor are all on the first tab now instead of buried at line 320 of the
+old modal.
+
+### Anthropic mode: prompt caching, adaptive thinking, effort, no temperature
+
+Anthropic chat traffic now sends an Opus-4.7-correct payload:
+
+- `cache_control: {type: "ephemeral", ttl: "1h"}` on the system prompt
+  block, so the tools + system prefix is reused across turns. The chat
+  surfaces a small `cache Nt` pill once cache reads start landing.
+- `thinking: {type: "adaptive"}` by default. Claude decides when and
+  how much to reason; can be disabled per-chat for latency-sensitive
+  flows.
+- `output_config.effort` (low / medium / high / xhigh / max). Default
+  is high; xhigh is recommended for tool-heavy research.
+- `temperature` is no longer sent. Sampling parameters are removed on
+  Opus 4.7 and would 400; the proxy strips them server-side as well so
+  curl callers cannot trip the same wire.
+- `max_tokens` default raised from 1024 to 16000, configurable up to
+  64000.
+
+### SATCHEL system prompt for Anthropic chat
+
+A user-editable default system prompt is now sent on every Anthropic
+turn. It tells Claude how the vault works, when to use MCP tools, how
+to cite sources honestly, and how to read conversational data from
+Slack / Discord / WhatsApp / chat exports (fetch surrounding context
+before drawing conclusions on a single matched line).
+
+The prompt also enforces a house style: no emdashes, no AI-cliche
+phrasing ("Great question", "I'd be happy to help", "It's important to
+note", etc.), no throat-clearing preambles, no filler hedges, prose
+over bullets unless the content is genuinely a list, and emoji used
+sparingly. Editable in Settings → Cloud → System Prompt with a "reset
+to default" button.
+
+### Errors no longer render as "[object Object]"
+
+`(e as Error).message` rendering across the chat has been replaced with
+a shared `errMessage(unknown)` helper that handles plain strings,
+Error instances, `{message}` / `{error}` / nested Anthropic API error
+shapes, and falls back to `JSON.stringify` before ever returning
+"[object Object]". Every catch block in Chat.svelte routes through it.
+
+### Reasoning blocks no longer collapse mid-read
+
+`<ReasoningBlock>` now seeds an internal `bind:open` state from its
+prop and lets the user's expand/collapse persist across parent
+re-renders. Previously, autoscroll on a streaming turn would re-render
+the message bubble and reset `<details {open}>` back to closed, which
+felt especially bad for the bottom-most reasoning block.
+
+### Internal
+
+`src/anthropic/mod.rs` now strips `temperature` / `top_p` / `top_k`
+from any request whose model starts with `claude-opus-4-7` (added 3
+unit tests). Server-side belt-and-suspenders for the client-side
+strip, so curl / script callers cannot trip a 400.
+
 ## v2.2.2 — 2026-05-02
 
 ### Reverted LSMultipleInstancesProhibited; single-instance now Rust-side

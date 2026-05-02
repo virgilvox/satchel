@@ -36,6 +36,7 @@
     type AnthropicTool,
     type AnthropicContentBlock,
   } from '../lib/anthropic';
+  import { errMessage } from '../lib/errors';
 
   const TRANSCRIPT_KEY = 'satchel-chat-transcript';
 
@@ -74,8 +75,22 @@
   });
   let contextFull = $state(false);
 
+  // Cumulative Anthropic prompt-cache hit count for the current chat.
+  // Incremented after each successful turn from
+  // `result.usage.cache_read_input_tokens`. Displayed as a pill so the
+  // user can see caching is paying off.
+  let cacheReadTokens = $state(0);
+
   // ---- Settings modal (rail removed in v1.4.0) ----
   let settingsOpen = $state(false);
+  // Optional deep-link target. Set before opening to land on a specific
+  // tab (e.g. "cloud" when the user clicks SET API KEY).
+  let settingsInitialSection = $state<'local' | 'cloud' | 'mcp' | 'persistence' | undefined>(undefined);
+
+  function openSettings(section?: 'local' | 'cloud' | 'mcp' | 'persistence') {
+    settingsInitialSection = section;
+    settingsOpen = true;
+  }
 
   $effect(() => {
     checkSupport().then((s) => (support = s));
@@ -198,7 +213,7 @@
       lastUsage = { prompt: 0, total: 0, window: ctx ?? 4096 };
       contextFull = false;
     } catch (e) {
-      loadError = (e as Error).message;
+      loadError = errMessage(e);
       engine = null;
       liveBackend = null;
     } finally {
@@ -227,7 +242,7 @@
       mcpStatus = 'connected';
     } catch (e) {
       mcpStatus = 'error';
-      mcpError = (e as Error).message;
+      mcpError = errMessage(e);
     }
   }
 
@@ -254,7 +269,7 @@
     } catch (e) {
       transcript = [
         ...transcript,
-        { id: crypto.randomUUID(), role: 'error', content: (e as Error).message },
+        { id: crypto.randomUUID(), role: 'error', content: errMessage(e) },
       ];
     } finally {
       busy = false;
@@ -326,7 +341,7 @@
           }
         );
       } catch (e) {
-        const msg = (e as Error).message || String(e);
+        const msg = errMessage(e);
         // XGrammar can reject some MCP tool argument schemas even after
         // sanitization. Fall back to the loose schema for this turn and
         // retry once.
@@ -455,7 +470,7 @@
               }
         );
       } catch (e) {
-        const errMsg = (e as Error).message;
+        const errMsg = errMessage(e);
         transcript = transcript.map((m) =>
           m.id !== aId || !m.toolCalls
             ? m
@@ -586,8 +601,10 @@
             messages,
             tools: anthropicTools.length ? anthropicTools : undefined,
             system: systemPrompt,
-            max_tokens: chatSettings.maxTokens,
-            temperature: chatSettings.temperature,
+            max_tokens: chatSettings.anthropicMaxTokens,
+            cache: chatSettings.anthropicCaching,
+            thinking: chatSettings.anthropicThinking,
+            effort: chatSettings.anthropicEffort,
           },
           (delta) => {
             transcript = transcript.map((m2) =>
@@ -596,7 +613,7 @@
           },
         );
       } catch (e) {
-        const msg = (e as Error).message;
+        const msg = errMessage(e);
         transcript = transcript.map((m2) =>
           m2.id !== aId
             ? m2
@@ -614,7 +631,12 @@
         return;
       }
 
-      // No tool calls? Final answer — finalize and exit.
+      // Track cumulative cache hits across the chat session.
+      if (result.usage.cache_read_input_tokens) {
+        cacheReadTokens += result.usage.cache_read_input_tokens;
+      }
+
+      // No tool calls? Final answer; finalize and exit.
       if (result.toolUses.length === 0) {
         transcript = transcript.map((m2) =>
           m2.id !== aId
@@ -657,7 +679,7 @@
                 }
           );
         } catch (e) {
-          const errMsg = (e as Error).message;
+          const errMsg = errMessage(e);
           transcript = transcript.map((m2) =>
             m2.id !== aId || !m2.toolCalls
               ? m2
@@ -688,7 +710,9 @@
   }
 
   function buildAnthropicSystemPrompt(): string {
-    return `You are SATCHEL, an assistant grounded in the user's local knowledge vault. The user's data is in the tools below; never invent sources. Cite source paths in your answers. Keep answers concise.`;
+    // User-editable, persisted in chatSettings.anthropicSystemPrompt.
+    // Default lives in stores.svelte.ts (DEFAULT_ANTHROPIC_SYSTEM).
+    return chatSettings.anthropicSystemPrompt;
   }
 
   /** Translate the satchel transcript to Anthropic's `messages` shape.
@@ -792,10 +816,16 @@
         <span class="pill-text">ctx {ctxPct}% · {lastUsage.total}t</span>
       </Pill>
     {/if}
+    {#if liveBackend === 'anthropic' && cacheReadTokens > 0}
+      <Pill tone="teal">
+        <Dot tone="teal" />
+        <span class="pill-text" title="Tokens served from prompt cache this chat">cache {cacheReadTokens.toLocaleString()}t</span>
+      </Pill>
+    {/if}
   </div>
   <div class="strip-right">
     <button class="icon-btn" type="button" title="Chat settings" aria-label="Chat settings"
-      onclick={() => (settingsOpen = true)}>⚙</button>
+      onclick={() => openSettings()}>⚙</button>
     {#if transcript.length > 0}
       <button class="btn btn-secondary btn-sm" type="button" onclick={clearChat}>CLEAR</button>
     {/if}
@@ -805,7 +835,7 @@
 {#if contextFull}
   <div class="ctx-banner">
     <strong>Context full.</strong>
-    Open <button class="link" type="button" onclick={() => (settingsOpen = true)}>⚙ Settings → Context</button>
+    Open <button class="link" type="button" onclick={() => openSettings()}>⚙ Settings → Context</button>
     and pick <code>sliding_window_size</code> (the most reliable fix — keeps the recent N tokens, drops older), then UNLOAD + LOAD, or
     <button class="link" type="button" onclick={clearChat}>clear chat</button>
     to start fresh.
@@ -831,7 +861,7 @@
     </select>
     {#if selectedBackend === 'anthropic' && !anthropicConfigured}
       <button class="btn btn-secondary btn-sm" type="button"
-        onclick={() => (settingsOpen = true)}>SET API KEY</button>
+        onclick={() => openSettings('cloud')}>SET API KEY</button>
     {:else}
       <button class="btn btn-primary btn-sm" type="button" onclick={loadModel}
         disabled={loading || (selectedBackend === 'webllm' && !support?.supported)}>
@@ -921,6 +951,8 @@
   open={settingsOpen}
   onClose={() => (settingsOpen = false)}
   engineLoaded={!!liveBackend}
+  initialSection={settingsInitialSection}
+  activeBackend={selectedBackend}
   mcpEndpoint={settings.mcpEndpoint}
   {mcpStatus}
   {mcpError}

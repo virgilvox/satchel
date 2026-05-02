@@ -1,13 +1,20 @@
 <script lang="ts">
   interface Props {
     text: string;
-    /** Default to collapsed; users opt in to read the full chain. */
+    /** Default to collapsed; users opt in to read the full chain.
+     *  Treated as an initial value only — once the user toggles,
+     *  internal state takes over so parent re-renders (e.g. autoscroll
+     *  on streaming) cannot snap the box closed mid-read. */
     open?: boolean;
   }
   let { text, open = false }: Props = $props();
+  // Internal state seeded from the prop. `bind:open` keeps the DOM and
+  // this state in sync as the user toggles, and parent re-renders no
+  // longer overwrite the user's choice.
+  let expanded = $state(open);
 </script>
 
-<details class="reasoning" {open}>
+<details class="reasoning" bind:open={expanded}>
   <summary>
     <span class="glyph">∴</span>
     <span>REASONING</span>

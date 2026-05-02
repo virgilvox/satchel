@@ -77,21 +77,40 @@ impl AnthropicConfig {
     }
 }
 
+/// Strip sampling parameters that the requested model rejects.
+///
+/// Opus 4.7 returns 400 if `temperature`, `top_p`, or `top_k` are sent.
+/// Defense in depth: even though the chat UI no longer sends them in
+/// Anthropic mode, third-party clients (curl, scripts) hitting this
+/// proxy might. Drop them silently rather than letting Anthropic reject
+/// the whole request.
+fn strip_unsupported_params(body: &mut serde_json::Map<String, serde_json::Value>) {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if model.starts_with("claude-opus-4-7") {
+        body.remove("temperature");
+        body.remove("top_p");
+        body.remove("top_k");
+    }
+}
+
 /// Stream a Messages API call. The caller passes the raw JSON body the
-/// browser built (we don't re-validate it — Anthropic's error response
-/// is more informative than anything we'd write here) and gets back
-/// reqwest's response. We add the auth + version headers and force
-/// `stream: true` if the caller forgot.
+/// browser built. We add the auth + version headers, force `stream:
+/// true` if the caller forgot, and strip sampling parameters that the
+/// requested model would reject.
 pub async fn proxy_messages(api_key: &str, body: serde_json::Value) -> Result<reqwest::Response> {
     if api_key.trim().is_empty() {
         bail!("anthropic api key not configured — POST to /api/anthropic/config first");
     }
 
     // Guarantee streaming. Anthropic accepts non-stream too, but we
-    // always want SSE — that's the path the chat UI knows.
+    // always want SSE; that's the path the chat UI knows.
     let mut body = body;
     if let Some(map) = body.as_object_mut() {
         map.entry("stream").or_insert(serde_json::Value::Bool(true));
+        strip_unsupported_params(map);
     }
 
     let client = reqwest::Client::builder()
@@ -136,5 +155,36 @@ mod tests {
         };
         cfg.save(dir.path()).unwrap();
         assert!(AnthropicConfig::load(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn strips_sampling_params_on_opus_4_7() {
+        let mut body: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"model":"claude-opus-4-7","temperature":0.7,"top_p":0.9,"top_k":40,"max_tokens":1024}"#,
+        )
+        .unwrap();
+        strip_unsupported_params(&mut body);
+        assert!(!body.contains_key("temperature"));
+        assert!(!body.contains_key("top_p"));
+        assert!(!body.contains_key("top_k"));
+        assert_eq!(body.get("max_tokens").unwrap().as_i64().unwrap(), 1024);
+    }
+
+    #[test]
+    fn keeps_sampling_params_on_sonnet() {
+        let mut body: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"model":"claude-sonnet-4-6","temperature":0.7,"max_tokens":1024}"#,
+        )
+        .unwrap();
+        strip_unsupported_params(&mut body);
+        assert!(body.contains_key("temperature"));
+    }
+
+    #[test]
+    fn missing_model_is_a_noop() {
+        let mut body: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"temperature":0.7,"max_tokens":1024}"#).unwrap();
+        strip_unsupported_params(&mut body);
+        assert!(body.contains_key("temperature"));
     }
 }

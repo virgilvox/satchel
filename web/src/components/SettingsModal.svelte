@@ -2,7 +2,13 @@
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import Dot from './Dot.svelte';
-  import { chatSettings, type ContextSize, type SlidingSize } from '../lib/stores.svelte';
+  import {
+    chatSettings,
+    type ContextSize,
+    type SlidingSize,
+    type AnthropicEffort,
+    type AnthropicThinkingMode,
+  } from '../lib/stores.svelte';
   import type { McpTool } from '../lib/types';
   import {
     getAnthropicConfigured,
@@ -17,6 +23,7 @@
   } from '../lib/mcpServers';
 
   type McpStatus = 'idle' | 'connecting' | 'connected' | 'error';
+  type Section = 'cloud' | 'local' | 'mcp' | 'persistence';
 
   interface Props {
     open: boolean;
@@ -25,6 +32,13 @@
      *  changes need an UNLOAD + LOAD round-trip to take effect. We grey
      *  those rows out when the engine is hot. */
     engineLoaded: boolean;
+    /** Optional deep-link target. When set, the modal opens on this
+     *  section. Otherwise we default to the section that matches the
+     *  active chat backend. */
+    initialSection?: Section;
+    /** The chat's currently-selected backend, used to pick the default
+     *  tab when no explicit `initialSection` was passed. */
+    activeBackend?: 'webllm' | 'anthropic';
     /** Live MCP wiring passed from the chat — this modal owns the UI for
      *  endpoint editing + connection, but the connection lifecycle stays
      *  with the chat so the running session keeps its tool list. */
@@ -39,6 +53,8 @@
     open,
     onClose,
     engineLoaded,
+    initialSection,
+    activeBackend,
     mcpEndpoint,
     mcpStatus,
     mcpError,
@@ -49,6 +65,15 @@
 
   const ctxOptions: ContextSize[] = ['auto', 4096, 8192, 16384, 32768];
   const slidingOptions: SlidingSize[] = ['off', 1024, 2048, 4096, 8192];
+
+  // Active tab. Recomputed every time the modal opens so deep-links and
+  // backend defaults take effect on each open.
+  let section = $state<Section>('cloud');
+  $effect(() => {
+    if (!open) return;
+    if (initialSection) section = initialSection;
+    else section = activeBackend === 'webllm' ? 'local' : 'cloud';
+  });
 
   // WebLLM rejects when both context_window_size and sliding_window_size
   // are positive. Picking one here forces the other back to its sentinel
@@ -100,6 +125,9 @@
     await refreshAnthropic();
     anthropicSaving = false;
   }
+
+  const EFFORTS: AnthropicEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const THINKING_MODES: AnthropicThinkingMode[] = ['adaptive', 'disabled'];
 
   // ─── MCP servers (external) ──────────────────────────────────────────
   let mcpServers = $state<McpServerSummary[]>([]);
@@ -169,271 +197,381 @@
 </script>
 
 <Modal {open} title="CHAT SETTINGS" {onClose}>
+  <div class="tabs" role="tablist">
+    <button class="tab" class:active={section === 'cloud'} role="tab" type="button"
+      aria-selected={section === 'cloud'}
+      onclick={() => (section = 'cloud')}>CLOUD · CLAUDE</button>
+    <button class="tab" class:active={section === 'local'} role="tab" type="button"
+      aria-selected={section === 'local'}
+      onclick={() => (section = 'local')}>LOCAL · WEBLLM</button>
+    <button class="tab" class:active={section === 'mcp'} role="tab" type="button"
+      aria-selected={section === 'mcp'}
+      onclick={() => (section = 'mcp')}>MCP</button>
+    <button class="tab" class:active={section === 'persistence'} role="tab" type="button"
+      aria-selected={section === 'persistence'}
+      onclick={() => (section = 'persistence')}>PERSISTENCE</button>
+  </div>
+
   <div class="body">
-    <!-- ============ Generation ============ -->
-    <div class="section-label">GENERATION</div>
-
-    <div class="row">
-      <div class="row-head">
-        <span class="name">temperature</span>
-        <span class="val">{fmt(chatSettings.temperature, 2)}</span>
-      </div>
-      <input type="range" min="0" max="2" step="0.05"
-        value={chatSettings.temperature}
-        oninput={(e) => chatSettings.setTemperature(Number((e.target as HTMLInputElement).value))}
-      />
-      <p class="desc">Sampling temperature. Higher = more creative; lower = more deterministic. 0.6 is a good default for tool-using agents.</p>
-    </div>
-
-    <div class="row">
-      <div class="row-head">
-        <span class="name">max_tokens</span>
-        <span class="val">{chatSettings.maxTokens}</span>
-      </div>
-      <input type="range" min="256" max="4096" step="128"
-        value={chatSettings.maxTokens}
-        oninput={(e) => chatSettings.setMaxTokens(Number((e.target as HTMLInputElement).value))}
-      />
-      <p class="desc">Maximum tokens the model can emit per turn.</p>
-    </div>
-
-    <div class="row">
-      <div class="row-head">
-        <span class="name">max_rounds</span>
-        <span class="val">{chatSettings.maxRounds}</span>
-      </div>
-      <input type="range" min="1" max="20" step="1"
-        value={chatSettings.maxRounds}
-        oninput={(e) => chatSettings.setMaxRounds(Number((e.target as HTMLInputElement).value))}
-      />
-      <p class="desc">Hard cap on tool-call rounds per user turn.</p>
-    </div>
-
-    <!-- ============ Agent loop ============ -->
-    <div class="section-label">AGENT</div>
-
-    <div class="row">
-      <div class="row-head">
-        <span class="name">min_tool_calls</span>
-        <span class="val">{chatSettings.minToolCalls}</span>
-      </div>
-      <input type="range" min="0" max="5" step="1"
-        value={chatSettings.minToolCalls}
-        oninput={(e) => chatSettings.setMinToolCalls(Number((e.target as HTMLInputElement).value))}
-      />
-      <p class="desc">Persistence backstop. Model can't `respond_to_user` until it has called real tools at least this many times. 0 disables.</p>
-    </div>
-
-    <div class="row">
-      <div class="row-head">
-        <span class="name">weak_score_threshold</span>
-        <span class="val">{fmt(chatSettings.weakScoreThreshold, 3)}</span>
-      </div>
-      <input type="range" min="0" max="0.5" step="0.01"
-        value={chatSettings.weakScoreThreshold}
-        oninput={(e) => chatSettings.setWeakScoreThreshold(Number((e.target as HTMLInputElement).value))}
-      />
-      <p class="desc">RRF scores below this are "noise" — the system prompt tells the model not to base its final answer on results scoring below this line.</p>
-    </div>
-
-    <!-- ============ Context (engine-load) ============ -->
-    <div class="section-label">
-      CONTEXT
-      {#if engineLoaded}<span class="hint">· UNLOAD + RELOAD to apply</span>{/if}
-    </div>
-    <p class="desc">
-      Pick one strategy — the two are mutually exclusive. WebLLM rejects a load that sets both. Setting one resets the other automatically.
-    </p>
-
-    <div class="row" class:disabled={engineLoaded}>
-      <div class="row-head">
-        <span class="name">context_window_size</span>
-        <span class="val">{chatSettings.contextWindowSize}</span>
-      </div>
-      <select class="select"
-        disabled={engineLoaded}
-        value={String(chatSettings.contextWindowSize)}
-        onchange={(e) => setCtx((e.target as HTMLSelectElement).value)}
-      >
-        {#each ctxOptions as opt (opt)}
-          <option value={String(opt)}>{opt}</option>
-        {/each}
-      </select>
-      <p class="desc">Override the model's compiled context window. Hermes 3 3B defaults to 4096; 8192 fits ~3× more tool turns. Going past the model's compile-time max throws an error at LOAD.</p>
-    </div>
-
-    <div class="row" class:disabled={engineLoaded}>
-      <div class="row-head">
-        <span class="name">sliding_window_size</span>
-        <span class="val">{chatSettings.slidingWindowSize}</span>
-      </div>
-      <select class="select"
-        disabled={engineLoaded}
-        value={String(chatSettings.slidingWindowSize)}
-        onchange={(e) => setSliding((e.target as HTMLSelectElement).value)}
-      >
-        {#each slidingOptions as opt (opt)}
-          <option value={String(opt)}>{opt}</option>
-        {/each}
-      </select>
-      <p class="desc">Last-resort fallback when the transcript outgrows context: keep only the last N tokens in attention, drop older. Less ideal for tool-calling (the model loses earlier observations) but prevents hard failures.</p>
-    </div>
-
-    <!-- ============ MCP ============ -->
-    <div class="section-label">MCP ENDPOINT</div>
-    <p class="desc">
-      The local satchel MCP. Defaults to this server's <code>/mcp</code> route — change only if you're proxying through another endpoint.
-    </p>
-    <input
-      type="text"
-      class="select"
-      value={mcpEndpoint}
-      onchange={(e) => onMcpEndpointChange((e.target as HTMLInputElement).value)}
-    />
-    <div class="btn-row">
-      <button class="btn btn-secondary btn-sm" type="button" onclick={onMcpConnect}>RECONNECT</button>
-      <span class="mcp-status">
-        {#if mcpStatus === 'connected'}
-          <Dot tone="teal" /> connected · {tools.length} tool{tools.length === 1 ? '' : 's'}
-        {:else if mcpStatus === 'connecting'}
-          <Dot tone="amber" pulse /> connecting…
-        {:else if mcpStatus === 'error'}
-          <Dot tone="danger" /> {mcpError ?? 'error'}
-        {:else}
-          <Dot tone="dim" /> idle
-        {/if}
-      </span>
-    </div>
-
-    {#if tools.length > 0}
-      <div class="section-label">TOOLS <span class="count">{tools.length}</span></div>
-      <div class="tool-list">
-        {#each tools as t (t.name)}
-          <div class="tool">
-            <div class="tname">{t.name}</div>
-            {#if t.description}<div class="tdesc">{t.description}</div>{/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-
-    <!-- ============ Anthropic API ============ -->
-    <div class="section-label">ANTHROPIC API</div>
-    <p class="desc">
-      Use Claude (Opus / Sonnet / Haiku) in the Chat tab. The API key is
-      stored at <code>&lt;vault&gt;/anthropic.toml</code> with 0600 permissions; it
-      never leaves the server side after save. Chat traffic is proxied
-      through <code>/api/anthropic/messages</code> so the key stays out of the
-      browser.
-    </p>
-    <div class="row anthropic-status">
-      <Dot tone={anthropicConfigured ? 'teal' : 'dim'} />
-      <span class="name">{anthropicConfigured ? 'API key saved' : 'No API key configured'}</span>
-      {#if anthropicConfigured}
-        <button class="btn btn-secondary btn-sm" type="button"
-          onclick={clearAnthropic} disabled={anthropicSaving}>CLEAR</button>
-      {/if}
-    </div>
-    <input type="password" class="select" placeholder="sk-ant-…" autocomplete="off"
-      bind:value={anthropicKey} />
-    <div class="btn-row">
-      <button class="btn btn-primary btn-sm" type="button"
-        onclick={saveAnthropic}
-        disabled={anthropicSaving || !anthropicKey.trim()}>
-        {anthropicSaving ? 'SAVING…' : (anthropicConfigured ? 'REPLACE KEY' : 'SAVE KEY')}
-      </button>
-      <a class="link" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">get a key →</a>
-    </div>
-    {#if anthropicError}<p class="err">{anthropicError}</p>{/if}
-
-    <!-- ============ External MCP servers ============ -->
-    <div class="section-label">MCP SERVERS</div>
-    <p class="desc">
-      Wire up MCP servers other than satchel's own (GitHub MCP, filesystem
-      MCP, anything that speaks the protocol). Auth headers are stored at
-      <code>&lt;vault&gt;/mcp.toml</code> (0600) — the browser never sees them.
-      Traffic forwards through <code>/api/mcp/proxy/&lt;id&gt;</code>.
-    </p>
-    <div class="row builtin-mcp">
-      <Dot tone="teal" />
-      <span class="name">satchel</span>
-      <span class="desc-inline">always-on, your local vault — can't be removed</span>
-    </div>
-    {#each mcpServers as s (s.id)}
-      <div class="row">
-        <Dot tone={s.has_auth ? 'amber' : 'dim'} />
-        <span class="name">{s.name}</span>
-        <span class="desc-inline">{s.url}</span>
-        <button class="btn btn-secondary btn-sm" type="button" onclick={() => removeMcp(s.id)}>REMOVE</button>
-      </div>
-    {/each}
-    {#if mcpEditing}
-      <div class="form">
-        <label class="field">
-          <span class="field-label">id (URL-safe slug)</span>
-          <input type="text" class="select" placeholder="github" bind:value={mcpForm.id}
-            autocomplete="off" spellcheck="false" />
-        </label>
-        <label class="field">
-          <span class="field-label">label</span>
-          <input type="text" class="select" placeholder="GitHub MCP" bind:value={mcpForm.name}
-            autocomplete="off" />
-        </label>
-        <label class="field">
-          <span class="field-label">URL</span>
-          <input type="text" class="select" placeholder="https://example.com/mcp"
-            bind:value={mcpForm.url} autocomplete="off" spellcheck="false" />
-        </label>
-        <div class="auth-row">
-          <label class="field grow">
-            <span class="field-label">auth header (optional)</span>
-            <input type="text" class="select" placeholder="Authorization"
-              bind:value={mcpForm.authHeader} autocomplete="off" spellcheck="false" />
-          </label>
-          <label class="field grow">
-            <span class="field-label">value</span>
-            <input type="password" class="select" placeholder="Bearer …"
-              bind:value={mcpForm.authValue} autocomplete="off" />
-          </label>
-        </div>
-        <div class="btn-row">
-          <button class="btn btn-primary btn-sm" type="button" onclick={saveMcp}
-            disabled={!mcpForm.id.trim() || !mcpForm.url.trim()}>SAVE</button>
+    {#if section === 'cloud'}
+      <!-- ============ Anthropic API key ============ -->
+      <div class="section-label">API KEY</div>
+      <p class="desc">
+        Use Claude (Opus / Sonnet / Haiku) in the Chat tab. The API key is
+        stored at <code>&lt;vault&gt;/anthropic.toml</code> with 0600 permissions; it
+        never leaves the server side after save. Chat traffic is proxied
+        through <code>/api/anthropic/messages</code> so the key stays out of the
+        browser.
+      </p>
+      <div class="row anthropic-status">
+        <Dot tone={anthropicConfigured ? 'teal' : 'dim'} />
+        <span class="name">{anthropicConfigured ? 'API key saved' : 'No API key configured'}</span>
+        {#if anthropicConfigured}
           <button class="btn btn-secondary btn-sm" type="button"
-            onclick={() => (mcpEditing = false)}>CANCEL</button>
-        </div>
+            onclick={clearAnthropic} disabled={anthropicSaving}>CLEAR</button>
+        {/if}
       </div>
-    {:else}
+      <input type="password" class="select" placeholder="sk-ant-…" autocomplete="off"
+        bind:value={anthropicKey} />
       <div class="btn-row">
-        <button class="btn btn-secondary btn-sm" type="button" onclick={startAddMcp}>+ ADD MCP SERVER</button>
+        <button class="btn btn-primary btn-sm" type="button"
+          onclick={saveAnthropic}
+          disabled={anthropicSaving || !anthropicKey.trim()}>
+          {anthropicSaving ? 'SAVING…' : (anthropicConfigured ? 'REPLACE KEY' : 'SAVE KEY')}
+        </button>
+        <a class="link" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">get a key →</a>
+      </div>
+      {#if anthropicError}<p class="err">{anthropicError}</p>{/if}
+
+      <!-- ============ Generation (API mode) ============ -->
+      <div class="section-label">GENERATION</div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">effort</span>
+          <span class="val">{chatSettings.anthropicEffort}</span>
+        </div>
+        <div class="seg-group">
+          {#each EFFORTS as e (e)}
+            <button class="seg" class:active={chatSettings.anthropicEffort === e}
+              type="button" onclick={() => chatSettings.setAnthropicEffort(e)}>{e}</button>
+          {/each}
+        </div>
+        <p class="desc">
+          Controls how much Claude thinks and acts per turn. <code>xhigh</code> is the recommended setting for tool-using research; <code>high</code> is the safe default. <code>max</code> is Opus-tier only and best when correctness matters more than cost. <code>low</code> is for quick lookups.
+        </p>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">thinking</span>
+          <span class="val">{chatSettings.anthropicThinking}</span>
+        </div>
+        <div class="seg-group">
+          {#each THINKING_MODES as t (t)}
+            <button class="seg" class:active={chatSettings.anthropicThinking === t}
+              type="button" onclick={() => chatSettings.setAnthropicThinking(t)}>{t}</button>
+          {/each}
+        </div>
+        <p class="desc">
+          Adaptive thinking lets Claude decide when and how much to reason before answering. Recommended for RAG and tool-using flows. Disable for latency-sensitive lookups.
+        </p>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">max_tokens</span>
+          <span class="val">{chatSettings.anthropicMaxTokens.toLocaleString()}</span>
+        </div>
+        <input type="range" min="2048" max="64000" step="2048"
+          value={chatSettings.anthropicMaxTokens}
+          oninput={(e) => chatSettings.setAnthropicMaxTokens(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">
+          Maximum output tokens per turn. 16k is fine for chat; raise to 32k or 64k for long syntheses or code generation. Streaming is always on, so high values do not risk request timeouts.
+        </p>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">max_rounds</span>
+          <span class="val">{chatSettings.maxRounds}</span>
+        </div>
+        <input type="range" min="1" max="20" step="1"
+          value={chatSettings.maxRounds}
+          oninput={(e) => chatSettings.setMaxRounds(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">Hard cap on tool-call rounds per user turn.</p>
+      </div>
+
+      <label class="check">
+        <input type="checkbox"
+          checked={chatSettings.anthropicCaching}
+          onchange={(e) => chatSettings.setAnthropicCaching((e.target as HTMLInputElement).checked)}
+        />
+        <span>
+          <span class="name">prompt_caching</span>
+          <p class="desc">
+            Attach <code>cache_control</code> to the system prompt so the tools + system prefix is reused across turns (1-hour TTL). Cache reads are roughly 10% of the standard input price; cache writes carry a one-time premium that pays back after a couple of follow-up turns. Recommended on for any multi-turn conversation.
+          </p>
+        </span>
+      </label>
+
+      <!-- ============ System prompt ============ -->
+      <div class="section-label">SYSTEM PROMPT</div>
+      <p class="desc">
+        Sent on every Anthropic request, cached server-side. Edit to change Claude's behavior across all chats. The default tells Claude to ground answers in the vault, fetch surrounding context for chat-shaped data, cite sources honestly, and avoid the typical AI cliches and emdashes.
+      </p>
+      <textarea class="prompt-area"
+        rows="14"
+        spellcheck="false"
+        value={chatSettings.anthropicSystemPrompt}
+        oninput={(e) => chatSettings.setAnthropicSystemPrompt((e.target as HTMLTextAreaElement).value)}
+      ></textarea>
+      <div class="btn-row">
+        <button class="btn btn-secondary btn-sm" type="button"
+          onclick={() => chatSettings.resetAnthropicSystemPrompt()}>RESET TO DEFAULT</button>
       </div>
     {/if}
-    {#if mcpServerError}<p class="err">{mcpServerError}</p>{/if}
 
-    <!-- ============ Persistence ============ -->
-    <div class="section-label">PERSISTENCE</div>
+    {#if section === 'local'}
+      <!-- ============ WebLLM-only generation ============ -->
+      <div class="section-label">GENERATION</div>
 
-    <label class="check">
-      <input type="checkbox"
-        checked={chatSettings.persistHistory}
-        onchange={(e) => chatSettings.setPersistHistory((e.target as HTMLInputElement).checked)}
+      <div class="row">
+        <div class="row-head">
+          <span class="name">temperature</span>
+          <span class="val">{fmt(chatSettings.temperature, 2)}</span>
+        </div>
+        <input type="range" min="0" max="2" step="0.05"
+          value={chatSettings.temperature}
+          oninput={(e) => chatSettings.setTemperature(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">Sampling temperature for WebLLM models. Higher is more creative; lower is more deterministic. 0.6 is a good default for tool-using agents. Not used in Anthropic mode (sampling parameters are not supported on Opus 4.7).</p>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">max_tokens</span>
+          <span class="val">{chatSettings.maxTokens}</span>
+        </div>
+        <input type="range" min="256" max="4096" step="128"
+          value={chatSettings.maxTokens}
+          oninput={(e) => chatSettings.setMaxTokens(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">Maximum tokens the WebLLM model can emit per turn.</p>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">max_rounds</span>
+          <span class="val">{chatSettings.maxRounds}</span>
+        </div>
+        <input type="range" min="1" max="20" step="1"
+          value={chatSettings.maxRounds}
+          oninput={(e) => chatSettings.setMaxRounds(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">Hard cap on tool-call rounds per user turn. Shared with Anthropic mode.</p>
+      </div>
+
+      <!-- ============ Agent loop ============ -->
+      <div class="section-label">AGENT</div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">min_tool_calls</span>
+          <span class="val">{chatSettings.minToolCalls}</span>
+        </div>
+        <input type="range" min="0" max="5" step="1"
+          value={chatSettings.minToolCalls}
+          oninput={(e) => chatSettings.setMinToolCalls(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">Persistence backstop. Model can't <code>respond_to_user</code> until it has called real tools at least this many times. 0 disables.</p>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="name">weak_score_threshold</span>
+          <span class="val">{fmt(chatSettings.weakScoreThreshold, 3)}</span>
+        </div>
+        <input type="range" min="0" max="0.5" step="0.01"
+          value={chatSettings.weakScoreThreshold}
+          oninput={(e) => chatSettings.setWeakScoreThreshold(Number((e.target as HTMLInputElement).value))}
+        />
+        <p class="desc">RRF scores below this are noise; the system prompt tells the model not to base its final answer on results scoring below this line.</p>
+      </div>
+
+      <!-- ============ Context (engine-load) ============ -->
+      <div class="section-label">
+        CONTEXT
+        {#if engineLoaded}<span class="hint">· UNLOAD + RELOAD to apply</span>{/if}
+      </div>
+      <p class="desc">
+        Pick one strategy. The two are mutually exclusive and WebLLM rejects a load that sets both. Setting one resets the other automatically.
+      </p>
+
+      <div class="row" class:disabled={engineLoaded}>
+        <div class="row-head">
+          <span class="name">context_window_size</span>
+          <span class="val">{chatSettings.contextWindowSize}</span>
+        </div>
+        <select class="select"
+          disabled={engineLoaded}
+          value={String(chatSettings.contextWindowSize)}
+          onchange={(e) => setCtx((e.target as HTMLSelectElement).value)}
+        >
+          {#each ctxOptions as opt (opt)}
+            <option value={String(opt)}>{opt}</option>
+          {/each}
+        </select>
+        <p class="desc">Override the model's compiled context window. Going past the model's compile-time max throws an error at LOAD.</p>
+      </div>
+
+      <div class="row" class:disabled={engineLoaded}>
+        <div class="row-head">
+          <span class="name">sliding_window_size</span>
+          <span class="val">{chatSettings.slidingWindowSize}</span>
+        </div>
+        <select class="select"
+          disabled={engineLoaded}
+          value={String(chatSettings.slidingWindowSize)}
+          onchange={(e) => setSliding((e.target as HTMLSelectElement).value)}
+        >
+          {#each slidingOptions as opt (opt)}
+            <option value={String(opt)}>{opt}</option>
+          {/each}
+        </select>
+        <p class="desc">Last-resort fallback when the transcript outgrows context: keep only the last N tokens in attention, drop older. Less ideal for tool-calling (the model loses earlier observations) but prevents hard failures.</p>
+      </div>
+    {/if}
+
+    {#if section === 'mcp'}
+      <!-- ============ MCP endpoint ============ -->
+      <div class="section-label">MCP ENDPOINT</div>
+      <p class="desc">
+        The local satchel MCP. Defaults to this server's <code>/mcp</code> route; change only if you're proxying through another endpoint.
+      </p>
+      <input
+        type="text"
+        class="select"
+        value={mcpEndpoint}
+        onchange={(e) => onMcpEndpointChange((e.target as HTMLInputElement).value)}
       />
-      <span>
-        <span class="name">persist_history</span>
-        <p class="desc">Keep the chat transcript in localStorage so a refresh doesn't nuke it.</p>
-      </span>
-    </label>
+      <div class="btn-row">
+        <button class="btn btn-secondary btn-sm" type="button" onclick={onMcpConnect}>RECONNECT</button>
+        <span class="mcp-status">
+          {#if mcpStatus === 'connected'}
+            <Dot tone="teal" /> connected · {tools.length} tool{tools.length === 1 ? '' : 's'}
+          {:else if mcpStatus === 'connecting'}
+            <Dot tone="amber" pulse /> connecting…
+          {:else if mcpStatus === 'error'}
+            <Dot tone="danger" /> {mcpError ?? 'error'}
+          {:else}
+            <Dot tone="dim" /> idle
+          {/if}
+        </span>
+      </div>
 
-    <label class="check">
-      <input type="checkbox"
-        checked={chatSettings.showSystemPrompt}
-        onchange={(e) => chatSettings.setShowSystemPrompt((e.target as HTMLInputElement).checked)}
-      />
-      <span>
-        <span class="name">show_system_prompt</span>
-        <p class="desc">Reveal the system prompt being sent to the model (useful when debugging unexpected behavior).</p>
-      </span>
-    </label>
+      {#if tools.length > 0}
+        <div class="section-label">TOOLS <span class="count">{tools.length}</span></div>
+        <div class="tool-list">
+          {#each tools as t (t.name)}
+            <div class="tool">
+              <div class="tname">{t.name}</div>
+              {#if t.description}<div class="tdesc">{t.description}</div>{/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- ============ External MCP servers ============ -->
+      <div class="section-label">MCP SERVERS</div>
+      <p class="desc">
+        Wire up MCP servers other than satchel's own (GitHub MCP, filesystem MCP, anything that speaks the protocol). Auth headers are stored at
+        <code>&lt;vault&gt;/mcp.toml</code> (0600); the browser never sees them. Traffic forwards through <code>/api/mcp/proxy/&lt;id&gt;</code>.
+      </p>
+      <div class="row builtin-mcp">
+        <Dot tone="teal" />
+        <span class="name">satchel</span>
+        <span class="desc-inline">always-on, your local vault. Cannot be removed.</span>
+      </div>
+      {#each mcpServers as s (s.id)}
+        <div class="row">
+          <Dot tone={s.has_auth ? 'amber' : 'dim'} />
+          <span class="name">{s.name}</span>
+          <span class="desc-inline">{s.url}</span>
+          <button class="btn btn-secondary btn-sm" type="button" onclick={() => removeMcp(s.id)}>REMOVE</button>
+        </div>
+      {/each}
+      {#if mcpEditing}
+        <div class="form">
+          <label class="field">
+            <span class="field-label">id (URL-safe slug)</span>
+            <input type="text" class="select" placeholder="github" bind:value={mcpForm.id}
+              autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field-label">label</span>
+            <input type="text" class="select" placeholder="GitHub MCP" bind:value={mcpForm.name}
+              autocomplete="off" />
+          </label>
+          <label class="field">
+            <span class="field-label">URL</span>
+            <input type="text" class="select" placeholder="https://example.com/mcp"
+              bind:value={mcpForm.url} autocomplete="off" spellcheck="false" />
+          </label>
+          <div class="auth-row">
+            <label class="field grow">
+              <span class="field-label">auth header (optional)</span>
+              <input type="text" class="select" placeholder="Authorization"
+                bind:value={mcpForm.authHeader} autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="field grow">
+              <span class="field-label">value</span>
+              <input type="password" class="select" placeholder="Bearer …"
+                bind:value={mcpForm.authValue} autocomplete="off" />
+            </label>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary btn-sm" type="button" onclick={saveMcp}
+              disabled={!mcpForm.id.trim() || !mcpForm.url.trim()}>SAVE</button>
+            <button class="btn btn-secondary btn-sm" type="button"
+              onclick={() => (mcpEditing = false)}>CANCEL</button>
+          </div>
+        </div>
+      {:else}
+        <div class="btn-row">
+          <button class="btn btn-secondary btn-sm" type="button" onclick={startAddMcp}>+ ADD MCP SERVER</button>
+        </div>
+      {/if}
+      {#if mcpServerError}<p class="err">{mcpServerError}</p>{/if}
+    {/if}
+
+    {#if section === 'persistence'}
+      <div class="section-label">PERSISTENCE</div>
+
+      <label class="check">
+        <input type="checkbox"
+          checked={chatSettings.persistHistory}
+          onchange={(e) => chatSettings.setPersistHistory((e.target as HTMLInputElement).checked)}
+        />
+        <span>
+          <span class="name">persist_history</span>
+          <p class="desc">Keep the chat transcript in localStorage so a refresh does not nuke it.</p>
+        </span>
+      </label>
+
+      <label class="check">
+        <input type="checkbox"
+          checked={chatSettings.showSystemPrompt}
+          onchange={(e) => chatSettings.setShowSystemPrompt((e.target as HTMLInputElement).checked)}
+        />
+        <span>
+          <span class="name">show_system_prompt</span>
+          <p class="desc">Reveal the system prompt being sent to the model (useful when debugging unexpected behavior).</p>
+        </span>
+      </label>
+    {/if}
   </div>
 
   {#snippet footer()}
@@ -442,6 +580,32 @@
 </Modal>
 
 <style>
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 18px 0;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .tab {
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    color: var(--text-dim);
+    padding: 8px 14px;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    cursor: pointer;
+    margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: var(--text-bright);
+    background: var(--bg);
+    border-color: var(--border);
+    border-bottom-color: var(--bg);
+  }
+
   .body {
     overflow-y: auto;
     padding: 18px;
@@ -613,5 +777,49 @@
     background: var(--amber);
     border: 0;
     cursor: pointer;
+  }
+
+  /* Segmented control for effort + thinking toggles. */
+  .seg-group {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .seg {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 10px;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .seg:last-child { border-right: 0; }
+  .seg:hover { color: var(--text); }
+  .seg.active {
+    background: var(--amber);
+    color: var(--bg-deep);
+    font-weight: 700;
+  }
+
+  .prompt-area {
+    width: 100%;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11.5px;
+    line-height: 1.55;
+    padding: 10px;
+    resize: vertical;
+    min-height: 240px;
+  }
+  .prompt-area:focus {
+    outline: 1px solid var(--amber);
+    outline-offset: -1px;
   }
 </style>

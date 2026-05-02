@@ -93,7 +93,54 @@ const CHAT_KEYS = {
   slidingWindowSize: 'satchel-chat-sliding',
   persistHistory: 'satchel-chat-persist',
   showSystemPrompt: 'satchel-chat-show-sys',
+  // Anthropic-mode (separate from the WebLLM knobs above; some of those
+  // do not apply to API mode).
+  anthropicEffort: 'satchel-chat-anthropic-effort',
+  anthropicThinking: 'satchel-chat-anthropic-thinking',
+  anthropicMaxTokens: 'satchel-chat-anthropic-max-tokens',
+  anthropicCaching: 'satchel-chat-anthropic-caching',
+  anthropicSystemPrompt: 'satchel-chat-anthropic-system',
 };
+
+export type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type AnthropicThinkingMode = 'adaptive' | 'disabled';
+
+/** Default system prompt for Anthropic chat. Tells Claude how SATCHEL
+ *  works (RAG vault + MCP tools), how to behave responsibly with the
+ *  user's data, and the house style (no emdashes, no AI cliches, sparing
+ *  emoji). User-editable in Settings.
+ */
+export const DEFAULT_ANTHROPIC_SYSTEM = `You are SATCHEL, an assistant embedded in the user's personal knowledge vault. You have MCP tools that search and read this vault.
+
+How to use the vault
+- Prefer evidence from the vault over your training memory. When a question is about the user's data, call \`search_knowledge\` first; do not answer from prior knowledge alone.
+- Cite sources by document title and source path when you use them. Quote sparingly and accurately.
+- If the vault does not contain enough information to answer, say so plainly. Do not fabricate, embellish, or fill gaps with plausible-sounding guesses.
+- For multi-step or fact-heavy questions, plan tool calls before executing: name the tools you intend to call and why, then run them.
+- Distinguish three things in your answers: what the vault says, what you reasoned, and what you are uncertain about.
+
+Reading conversational data
+- A lot of vault content is conversational: Slack messages, Discord chats, WhatsApp threads, ChatGPT and Claude.ai exports, email. A single matched chunk in this kind of data is usually a fragment of a longer thread.
+- When a result looks like a chat message or thread fragment, fetch surrounding context before drawing conclusions: use \`list_sources\` or \`get_document\` (or another search scoped to the same source path) to read the messages immediately before and after.
+- Single-line sarcasm, replies, callbacks, and inside jokes routinely flip meaning when you read only the matched line. If a message is short, ambiguous, or refers to "this", "that", or "earlier", treat fetching context as required, not optional.
+- When you cite a chat message, name the participants and approximate timeframe if visible. "Alice in #design on 2026-04-12" beats a bare quote.
+
+House style
+- No emdashes. Use commas, colons, semicolons, or parentheses to join clauses.
+- No AI-cliche phrasing. Avoid: "Great question", "I'd be happy to help", "Certainly", "Absolutely", "It's important to note", "In summary", "I hope this helps", "Let me break this down", "First/Second/Finally" three-part scaffolding when it is not load-bearing.
+- No throat-clearing. Skip preambles and restating the question. Answer directly.
+- No filler hedges ("perhaps", "maybe", "it could be argued"). State what you know; flag what you do not.
+- Plain prose over bullet points unless the content is genuinely a list.
+- Emoji are fine, but sparing. One per response at most, and only when it adds signal.
+- Match length to the question. A short question gets a short answer.
+
+Operating principles
+- Never claim certainty you do not have.
+- Do not invent file paths, document titles, or quotes. If you did not see it, do not cite it.
+- When a tool call fails or returns nothing useful, say so and try a different angle rather than guessing.
+- The user's vault is private. Treat its contents with discretion in your phrasing.`;
+
+const ANTHROPIC_EFFORTS: AnthropicEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function readNumber(key: string, fallback: number): number {
   const raw = safeGet(key);
@@ -121,6 +168,18 @@ function readSliding(key: string, fallback: SlidingSize): SlidingSize {
   if (n === 1024 || n === 2048 || n === 4096 || n === 8192) return n;
   return fallback;
 }
+function readEffort(key: string, fallback: AnthropicEffort): AnthropicEffort {
+  const raw = safeGet(key);
+  if (!raw) return fallback;
+  return ANTHROPIC_EFFORTS.includes(raw as AnthropicEffort)
+    ? (raw as AnthropicEffort)
+    : fallback;
+}
+function readThinking(key: string, fallback: AnthropicThinkingMode): AnthropicThinkingMode {
+  const raw = safeGet(key);
+  if (raw === 'adaptive' || raw === 'disabled') return raw;
+  return fallback;
+}
 
 class ChatSettingsStore {
   // Generation
@@ -136,6 +195,12 @@ class ChatSettingsStore {
   // Persistence + debug
   persistHistory = $state(readBool(CHAT_KEYS.persistHistory, true));
   showSystemPrompt = $state(readBool(CHAT_KEYS.showSystemPrompt, false));
+  // Anthropic-mode (only consulted when the active backend is 'anthropic')
+  anthropicEffort = $state<AnthropicEffort>(readEffort(CHAT_KEYS.anthropicEffort, 'high'));
+  anthropicThinking = $state<AnthropicThinkingMode>(readThinking(CHAT_KEYS.anthropicThinking, 'adaptive'));
+  anthropicMaxTokens = $state(readNumber(CHAT_KEYS.anthropicMaxTokens, 16000));
+  anthropicCaching = $state(readBool(CHAT_KEYS.anthropicCaching, true));
+  anthropicSystemPrompt = $state(safeGet(CHAT_KEYS.anthropicSystemPrompt) ?? DEFAULT_ANTHROPIC_SYSTEM);
 
   setTemperature(v: number) { this.temperature = v; safeSet(CHAT_KEYS.temperature, String(v)); }
   setMaxTokens(v: number) { this.maxTokens = v; safeSet(CHAT_KEYS.maxTokens, String(v)); }
@@ -146,6 +211,12 @@ class ChatSettingsStore {
   setSlidingWindowSize(v: SlidingSize) { this.slidingWindowSize = v; safeSet(CHAT_KEYS.slidingWindowSize, String(v)); }
   setPersistHistory(v: boolean) { this.persistHistory = v; safeSet(CHAT_KEYS.persistHistory, v ? '1' : '0'); }
   setShowSystemPrompt(v: boolean) { this.showSystemPrompt = v; safeSet(CHAT_KEYS.showSystemPrompt, v ? '1' : '0'); }
+  setAnthropicEffort(v: AnthropicEffort) { this.anthropicEffort = v; safeSet(CHAT_KEYS.anthropicEffort, v); }
+  setAnthropicThinking(v: AnthropicThinkingMode) { this.anthropicThinking = v; safeSet(CHAT_KEYS.anthropicThinking, v); }
+  setAnthropicMaxTokens(v: number) { this.anthropicMaxTokens = v; safeSet(CHAT_KEYS.anthropicMaxTokens, String(v)); }
+  setAnthropicCaching(v: boolean) { this.anthropicCaching = v; safeSet(CHAT_KEYS.anthropicCaching, v ? '1' : '0'); }
+  setAnthropicSystemPrompt(v: string) { this.anthropicSystemPrompt = v; safeSet(CHAT_KEYS.anthropicSystemPrompt, v); }
+  resetAnthropicSystemPrompt() { this.setAnthropicSystemPrompt(DEFAULT_ANTHROPIC_SYSTEM); }
 }
 
 class SettingsStore {

@@ -31,13 +31,37 @@ export interface AnthropicMessage {
   content: string | AnthropicContentBlock[];
 }
 
+export type AnthropicEffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface AnthropicStreamRequest {
   model: string;
   messages: AnthropicMessage[];
   tools?: AnthropicTool[];
+  /** Plain string is convenient for callers; we promote it to a single
+   *  `text` block server-side when caching is enabled. */
   system?: string;
+  /** Defaults to 16000. Streaming tolerates up to 64000 on Opus 4.7 /
+   *  Sonnet 4.6, but most chat turns finish well under 16k and the
+   *  smaller default keeps bills predictable. */
   max_tokens?: number;
-  temperature?: number;
+  /** When true, attaches `cache_control: {type: "ephemeral", ttl: "1h"}`
+   *  to the system prompt so the tools + system prefix is reused across
+   *  turns. Render order is tools then system, so a single breakpoint on
+   *  the last system block caches both. */
+  cache?: boolean;
+  /** Adaptive thinking is the recommended mode on Opus 4.7 / 4.6 /
+   *  Sonnet 4.6. `disabled` skips it for latency-sensitive cases. */
+  thinking?: 'adaptive' | 'disabled';
+  /** Effort lives inside `output_config`, not at the top level. We
+   *  accept it flat here and rewrap. */
+  effort?: AnthropicEffortLevel;
+}
+
+export interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
 }
 
 export interface AnthropicTurnResult {
@@ -45,15 +69,18 @@ export interface AnthropicTurnResult {
   text: string;
   /** Any tool_use blocks the model emitted this turn. */
   toolUses: AnthropicToolUseBlock[];
-  /** "end_turn" | "tool_use" | "stop_sequence" | "max_tokens". */
+  /** "end_turn" | "tool_use" | "stop_sequence" | "max_tokens" | "refusal". */
   stopReason: string | null;
+  /** Token accounting from the upstream `message_start` + `message_delta`
+   *  events. Cache fields are populated when prompt caching is in use. */
+  usage: AnthropicUsage;
   /** Set on Anthropic API error (4xx / 5xx parsed out of the SSE stream). */
   error?: string;
 }
 
 /**
  * Run one Anthropic Messages turn through the satchel proxy. Returns when
- * the SSE stream ends. The caller drives the agent loop — if the result
+ * the SSE stream ends. The caller drives the agent loop: if the result
  * contains tool_uses, dispatch them, push tool_result blocks, and call
  * this again.
  *
@@ -65,15 +92,41 @@ export async function streamAnthropicTurn(
   onTextDelta: (delta: string) => void,
   signal?: AbortSignal,
 ): Promise<AnthropicTurnResult> {
-  const body = JSON.stringify({
-    ...req,
+  // Build the wire-format body with caching, thinking, and effort applied.
+  // System prompt becomes a single-block array when caching is enabled so
+  // we can attach `cache_control` to it; otherwise we leave it as a bare
+  // string (smaller payload, no behavioral difference).
+  const wire: Record<string, unknown> = {
+    model: req.model,
+    messages: req.messages,
     stream: true,
-    max_tokens: req.max_tokens ?? 1024,
-  });
+    max_tokens: req.max_tokens ?? 16000,
+  };
+  if (req.tools?.length) wire.tools = req.tools;
+  if (req.system) {
+    if (req.cache) {
+      wire.system = [
+        {
+          type: 'text',
+          text: req.system,
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        },
+      ];
+    } else {
+      wire.system = req.system;
+    }
+  }
+  if (req.thinking === 'adaptive') {
+    wire.thinking = { type: 'adaptive' };
+  }
+  if (req.effort) {
+    wire.output_config = { effort: req.effort };
+  }
+
   const res = await fetch(ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body,
+    body: JSON.stringify(wire),
     signal,
   });
   if (!res.ok) {
@@ -88,11 +141,18 @@ export async function streamAnthropicTurn(
       text: '',
       toolUses: [],
       stopReason: null,
+      usage: {},
       error: `anthropic proxy ${res.status}: ${detail || res.statusText}`,
     };
   }
   if (!res.body) {
-    return { text: '', toolUses: [], stopReason: null, error: 'empty response body' };
+    return {
+      text: '',
+      toolUses: [],
+      stopReason: null,
+      usage: {},
+      error: 'empty response body',
+    };
   }
 
   // Accumulators. Anthropic's stream emits message_start, content_block_start
@@ -103,6 +163,7 @@ export async function streamAnthropicTurn(
     {};
   let stopReason: string | null = null;
   let streamError: string | undefined;
+  const usage: AnthropicUsage = {};
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -121,6 +182,16 @@ export async function streamAnthropicTurn(
     }
   }
 
+  function mergeUsage(u: Record<string, unknown> | undefined) {
+    if (!u || typeof u !== 'object') return;
+    if (typeof u.input_tokens === 'number') usage.input_tokens = u.input_tokens;
+    if (typeof u.output_tokens === 'number') usage.output_tokens = u.output_tokens;
+    if (typeof u.cache_creation_input_tokens === 'number')
+      usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
+    if (typeof u.cache_read_input_tokens === 'number')
+      usage.cache_read_input_tokens = u.cache_read_input_tokens;
+  }
+
   function processEvent(raw: string) {
     let eventType: string | null = null;
     const dataLines: string[] = [];
@@ -137,6 +208,11 @@ export async function streamAnthropicTurn(
       return;
     }
     switch (eventType ?? payload?.type) {
+      case 'message_start': {
+        // Initial usage: input_tokens + cache_* fields.
+        mergeUsage(payload?.message?.usage);
+        break;
+      }
       case 'content_block_start': {
         const idx = payload.index as number;
         const t = payload.content_block?.type;
@@ -167,6 +243,8 @@ export async function streamAnthropicTurn(
       }
       case 'message_delta': {
         if (payload.delta?.stop_reason) stopReason = payload.delta.stop_reason;
+        // Final usage update: output_tokens lands here.
+        mergeUsage(payload?.usage);
         break;
       }
       case 'error': {
@@ -197,7 +275,7 @@ export async function streamAnthropicTurn(
     });
   }
 
-  return { text, toolUses, stopReason, error: streamError };
+  return { text, toolUses, stopReason, usage, error: streamError };
 }
 
 export async function getAnthropicConfigured(): Promise<boolean> {
