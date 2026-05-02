@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.4.0 — 2026-05-01
+
+### Chat layout: engine bar on top, no rail
+
+Chat tab was a fixed 280 px sidebar (model picker + MCP config + tools
+list) plus the chat. Way too much chrome for what's mostly a chat
+window. Restructured:
+
+- **Status strip** above the chat (model · MCP · tools · round · ctx
+  pills + ⚙ + CLEAR) — same role as before, unchanged.
+- **Engine bar** below the strip: model picker + LOAD button when no
+  engine is loaded, shrinks to a single-line "ready · UNLOAD" once a
+  model is hot. Inline with the chat instead of in a sidebar.
+- **MCP endpoint** + **tools list** moved into the Settings modal
+  (gear button) — they're configured rarely, so they don't earn
+  permanent screen real estate.
+- The rail is gone entirely — no desktop sidebar, no mobile drawer,
+  no toggle. The chat fills the whole width on every viewport.
+
+### Compact tool cards
+
+Tool calls used to render as fat teal boxes with full args + result
+visible always. New `ToolCallCard` is collapsed by default — a
+one-liner `→ search_knowledge {"query":"…"} OK`. Click anywhere on
+the row to expand for full args + result. Pending calls auto-expand
+(so the user can see what the model is asking for in flight) and
+collapse once the result lands.
+
+Same data, ~5× less vertical space in a multi-tool transcript.
+
+### Smoke
+
+Playwright at 1280×900 + 390×844: rail removed (locator count 0),
+engine bar visible on both viewports, Settings modal grows the
+expected sections (`GENERATION`, `AGENT`, `CONTEXT`, `MCP ENDPOINT`,
+`TOOLS 5`, `PERSISTENCE`), no overflow, no console errors.
+
 ## v1.3.0 — 2026-05-01
 
 ### Tunnel: named-mode (stable URL on your own domain)

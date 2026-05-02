@@ -56,8 +56,7 @@
   });
   let contextFull = $state(false);
 
-  // ---- Mobile drawer + settings modal ----
-  let railOpen = $state(false);
+  // ---- Settings modal (rail removed in v1.4.0) ----
   let settingsOpen = $state(false);
 
   $effect(() => {
@@ -185,7 +184,6 @@
 
     transcript = [...transcript, { id: crypto.randomUUID(), role: 'user', content: text }];
     scrollToBottom();
-    railOpen = false; // collapse the drawer on mobile when the user sends
 
     try {
       await runLoop();
@@ -494,13 +492,12 @@
 <ViewHead num="08" title={`CHAT <span class="slash">/</span> BROWSER LLM + MCP`}
   desc="A small LLM runs entirely in this browser via WebGPU. Tool calls dispatch to the local MCP server. Nothing leaves your machine." />
 
-<!-- Status / actions strip — visible above the chat in both layouts. -->
+<!-- ───────── Status strip · always above the chat ─────────
+     Compact pills for live state. The full controls (settings, MCP
+     endpoint, tools list) live in the gear-button modal so the chat
+     window stays as roomy as possible. -->
 <div class="strip">
   <div class="strip-left">
-    <button class="rail-toggle" type="button" onclick={() => (railOpen = !railOpen)}
-      aria-expanded={railOpen} aria-label="Toggle model + MCP panel">
-      ☰ MODEL · MCP
-    </button>
     {#if engine}
       <Pill tone="teal"><Dot tone="teal" /><span class="pill-text">{modelInfo?.label ?? 'model'}</span></Pill>
     {:else if loading}
@@ -544,112 +541,74 @@
   </div>
 {/if}
 
-<div class="layout">
-  <!-- Rail: collapsed off-canvas on mobile, sticky sidebar on desktop -->
-  <aside class="rail" class:open={railOpen}>
-    <div class="rail-head mobile-only">
-      <span class="rail-title">SETTINGS</span>
-      <button class="close-x" type="button" onclick={() => (railOpen = false)} aria-label="Close panel">×</button>
-    </div>
-
-    <div class="section-label">MODEL</div>
-    <select class="select" bind:value={settings.chatModel} disabled={loading || !!engine}
-      onchange={() => settings.setModel(settings.chatModel)}>
+<!-- ───────── Engine bar · model picker + LOAD/UNLOAD ─────────
+     Inline above the chat instead of off in a sidebar. When no model is
+     loaded the picker + LOAD button are visible. Once an engine is hot
+     the bar shrinks to a one-line "ready" affordance with UNLOAD. -->
+<div class="engine-bar" class:hot={!!engine}>
+  {#if !engine}
+    <select class="select model-select" bind:value={settings.chatModel}
+      disabled={loading} onchange={() => settings.setModel(settings.chatModel)}>
       {#each MODELS as m (m.id)}
         <option value={m.id}>{m.label} · {m.size}</option>
       {/each}
     </select>
+    <button class="btn btn-primary btn-sm" type="button" onclick={loadModel}
+      disabled={loading || !support?.supported}>
+      {loading ? `LOADING ${progressPct}%` : 'LOAD'}
+    </button>
     {#if modelInfo?.notes}
-      <p class="note">{modelInfo.notes}</p>
+      <p class="model-note">{modelInfo.notes}</p>
     {/if}
-    <div class="btn-row">
-      {#if !engine}
-        <button class="btn btn-primary btn-sm" onclick={loadModel}
-          disabled={loading || !support?.supported}>LOAD</button>
-      {:else}
-        <button class="btn btn-secondary btn-sm" onclick={unloadModel}>UNLOAD</button>
-      {/if}
+  {:else}
+    <div class="engine-ready">
+      <Dot tone="teal" />
+      <span class="ready-text">{settings.chatModel}</span>
     </div>
-
-    {#if support && !support.supported}
-      <StatusLine text={'WEBGPU UNAVAILABLE · ' + (support.reason ?? '')} tone="danger" />
-    {/if}
-    {#if loading}
-      <div class="prog">
-        <div class="bar"><div class="fill" style="width:{progressPct}%"></div></div>
-        <div class="prog-label">{progress.text} · {progressPct}%</div>
-      </div>
-    {:else if engine}
-      <div class="prog-label ok">READY · {settings.chatModel}</div>
-    {:else if loadError}
-      <StatusLine text={'LOAD FAILED · ' + loadError} tone="danger" />
-    {/if}
-
-    <div class="section-label">MCP</div>
-    <input type="text" class="input" bind:value={settings.mcpEndpoint}
-      onchange={() => settings.setMcp(settings.mcpEndpoint)} />
-    <div class="btn-row">
-      <button class="btn btn-secondary btn-sm" onclick={connectMcp}>CONNECT</button>
-    </div>
-    <div class="prog-label">
-      {#if mcpStatus === 'connected'}
-        <Dot tone="teal" /> connected · {tools.length} tool{tools.length === 1 ? '' : 's'}
-      {:else if mcpStatus === 'connecting'}
-        <Dot tone="amber" pulse /> connecting...
-      {:else if mcpStatus === 'error'}
-        <Dot tone="danger" /> {mcpError}
-      {:else}
-        <Dot tone="dim" /> idle
-      {/if}
-    </div>
-
-    {#if tools.length > 0}
-      <div class="section-label">TOOLS <span class="count">{tools.length}</span></div>
-      <div class="tool-list">
-        {#each tools as t (t.name)}
-          <div class="tool">
-            <div class="tname">{t.name}</div>
-            <div class="tdesc">{t.description}</div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </aside>
-
-  <!-- Backdrop for mobile drawer -->
-  {#if railOpen}
-    <button class="backdrop" type="button" aria-label="Close panel" onclick={() => (railOpen = false)}></button>
+    <button class="btn btn-secondary btn-sm" type="button" onclick={unloadModel}>UNLOAD</button>
   {/if}
+</div>
 
-  <div class="main">
-    <div class="stream" bind:this={stream}>
-      {#if transcript.length === 0}
-        <div class="welcome">
-          <Mark size={72} strong />
-          <h3>BROWSER LLM · LOCAL MCP</h3>
-          <p>A small model runs in this browser via WebGPU. Tool calls go straight to the local MCP server. Nothing leaves your machine.</p>
-          {#if !engine && !loading}
-            <p class="hint">
-              <kbd>1.</kbd> open <strong>MODEL · MCP</strong> ·
-              <kbd>2.</kbd> pick a model + LOAD ·
-              <kbd>3.</kbd> ask
-            </p>
-          {/if}
-          <p class="hint mode">
-            <span class="glyph">⚒</span>
-            <span>Output is constrained by an XGrammar logit mask — the model literally cannot emit invalid JSON or hallucinate tool names. Works with every model in the list, not just the Hermes whitelist.</span>
-          </p>
-        </div>
-      {:else}
-        {#each transcript as m (m.id)}
-          <MessageBubble message={m} />
-        {/each}
-      {/if}
-    </div>
-    <Composer onSend={send} onCancel={cancel} {busy}
-      placeholder={engine ? 'message... (enter to send, shift+enter newline)' : 'load a model first...'}
-      disabled={!canSend && !busy} />
+{#if support && !support.supported}
+  <StatusLine text={'WEBGPU UNAVAILABLE · ' + (support.reason ?? '')} tone="danger" />
+{/if}
+{#if loading}
+  <div class="prog">
+    <div class="bar"><div class="fill" style="width:{progressPct}%"></div></div>
+    <div class="prog-label">{progress.text} · {progressPct}%</div>
   </div>
+{:else if loadError}
+  <StatusLine text={'LOAD FAILED · ' + loadError} tone="danger" />
+{/if}
+
+<div class="main">
+  <div class="stream" bind:this={stream}>
+    {#if transcript.length === 0}
+      <div class="welcome">
+        <Mark size={72} strong />
+        <h3>BROWSER LLM · LOCAL MCP</h3>
+        <p>A small model runs in this browser via WebGPU. Tool calls go straight to the local MCP server. Nothing leaves your machine.</p>
+        {#if !engine && !loading}
+          <p class="hint">
+            <kbd>1.</kbd> pick a model above + LOAD ·
+            <kbd>2.</kbd> wait for MCP to show <strong>connected</strong> ·
+            <kbd>3.</kbd> ask
+          </p>
+        {/if}
+        <p class="hint mode">
+          <span class="glyph">⚒</span>
+          <span>Output is constrained by an XGrammar logit mask — the model literally cannot emit invalid JSON or hallucinate tool names. Works with every model in the list, not just the Hermes whitelist.</span>
+        </p>
+      </div>
+    {:else}
+      {#each transcript as m (m.id)}
+        <MessageBubble message={m} />
+      {/each}
+    {/if}
+  </div>
+  <Composer onSend={send} onCancel={cancel} {busy}
+    placeholder={engine ? 'message... (enter to send, shift+enter newline)' : 'load a model first...'}
+    disabled={!canSend && !busy} />
 </div>
 
 {#if chatSettings.showSystemPrompt && tools.length}
@@ -663,7 +622,17 @@
   </details>
 {/if}
 
-<SettingsModal open={settingsOpen} onClose={() => (settingsOpen = false)} engineLoaded={!!engine} />
+<SettingsModal
+  open={settingsOpen}
+  onClose={() => (settingsOpen = false)}
+  engineLoaded={!!engine}
+  mcpEndpoint={settings.mcpEndpoint}
+  {mcpStatus}
+  {mcpError}
+  {tools}
+  onMcpEndpointChange={(url) => settings.setMcp(url)}
+  onMcpConnect={connectMcp}
+/>
 
 <style>
   .strip {
@@ -683,22 +652,6 @@
     flex-wrap: wrap;
   }
   .pill-text { white-space: nowrap; }
-
-  .rail-toggle {
-    font-family: inherit;
-    font-size: 10px;
-    letter-spacing: 2px;
-    font-weight: 700;
-    text-transform: uppercase;
-    padding: 6px 12px;
-    background: var(--surface);
-    color: var(--text);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    display: none;
-    transition: 120ms ease;
-  }
-  .rail-toggle:hover { color: var(--amber); border-color: var(--amber-line); }
 
   .icon-btn {
     font-family: inherit;
@@ -776,59 +729,60 @@
     overflow-y: auto;
   }
 
-  .layout {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    gap: 24px;
-    align-items: start;
-    position: relative;
-  }
-  .rail {
+  /* ───── Engine bar — model picker + LOAD/UNLOAD inline above chat ───── */
+  .engine-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
     border: 1px solid var(--border);
     background: var(--surface);
-    padding: 18px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    position: sticky;
-    top: 80px;
-    max-height: calc(100vh - 100px);
-    overflow-y: auto;
+    margin-bottom: 14px;
   }
-  .rail .section-label { margin: 12px 0 6px; }
-  .rail .section-label:first-of-type { margin-top: 0; }
-  .rail-head { display: none; }
-  .mobile-only { display: none; }
-  .backdrop { display: none; }
+  .engine-bar.hot { padding: 8px 14px; }
+  .model-select {
+    flex: 1;
+    min-width: 220px;
+    width: auto;
+  }
+  .model-note {
+    flex-basis: 100%;
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.55;
+    margin: 0;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border);
+  }
+  .engine-ready {
+    flex: 1;
+    min-width: 220px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--teal);
+    font-size: 11px;
+    letter-spacing: 1px;
+    font-weight: 700;
+  }
+  .ready-text { color: var(--text); font-weight: 500; word-break: break-all; }
 
-  .note { font-size: 11px; color: var(--text-dim); line-height: 1.55; }
+  .prog { margin-bottom: 14px; }
   .prog .bar { height: 3px; background: var(--border); overflow: hidden; }
   .prog .fill { height: 100%; background: var(--amber); transition: width 220ms ease; }
-  .prog-label, .ok {
+  .prog-label {
     font-size: 10px;
     letter-spacing: 1.5px;
     color: var(--text-dim);
     margin-top: 6px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
   }
-  .ok { color: var(--teal); }
-
-  .tool-list { display: flex; flex-direction: column; gap: 6px; }
-  .tool {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    padding: 8px 10px;
-  }
-  .tname { color: var(--teal); font-weight: 700; font-size: 11px; word-break: break-word; }
-  .tdesc { color: var(--text-dim); font-size: 10px; line-height: 1.5; }
 
   .main {
     display: flex;
     flex-direction: column;
     min-height: 60vh;
-    min-width: 0; /* let children shrink in the grid */
+    min-width: 0;
   }
   .stream {
     flex: 1;
@@ -875,61 +829,10 @@
   }
   strong { color: var(--text-bright); font-weight: 700; }
 
-  /* ============================================================
-     Mobile-first responsive: single column, rail becomes a drawer.
-  ============================================================ */
+  /* ───── Mobile responsive — single-column already; just tighten spacing ───── */
   @media (max-width: 880px) {
     .strip { padding: 6px 0 10px; }
-    .rail-toggle { display: inline-flex; align-items: center; gap: 8px; }
-    .layout { grid-template-columns: 1fr; gap: 0; }
-    .rail {
-      position: fixed;
-      top: 0;
-      bottom: 0;
-      left: -340px;
-      width: 320px;
-      max-width: 86vw;
-      max-height: 100vh;
-      z-index: 80;
-      transition: left 220ms ease;
-      box-shadow: var(--shadow-frame);
-    }
-    .rail.open { left: 0; }
-    .rail-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 10px;
-    }
-    .rail-title {
-      font-size: 11px;
-      letter-spacing: 2.5px;
-      text-transform: uppercase;
-      color: var(--amber);
-      font-weight: 700;
-    }
-    .close-x {
-      background: transparent;
-      border: none;
-      color: var(--text-dim);
-      font-size: 22px;
-      line-height: 1;
-      cursor: pointer;
-      padding: 0 6px;
-    }
-    .close-x:hover { color: var(--text-bright); }
-    .mobile-only { display: flex; }
-    .backdrop {
-      display: block;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.55);
-      z-index: 70;
-      border: none;
-      cursor: pointer;
-    }
-    .stream { max-height: calc(100vh - 240px); }
+    .engine-bar { padding: 10px; }
+    .stream { max-height: calc(100vh - 280px); }
   }
 </style>

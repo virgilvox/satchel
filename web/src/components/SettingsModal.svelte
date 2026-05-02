@@ -1,6 +1,10 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
+  import Dot from './Dot.svelte';
   import { chatSettings, type ContextSize, type SlidingSize } from '../lib/stores.svelte';
+  import type { McpTool } from '../lib/types';
+
+  type McpStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
   interface Props {
     open: boolean;
@@ -9,8 +13,27 @@
      *  changes need an UNLOAD + LOAD round-trip to take effect. We grey
      *  those rows out when the engine is hot. */
     engineLoaded: boolean;
+    /** Live MCP wiring passed from the chat — this modal owns the UI for
+     *  endpoint editing + connection, but the connection lifecycle stays
+     *  with the chat so the running session keeps its tool list. */
+    mcpEndpoint: string;
+    mcpStatus: McpStatus;
+    mcpError?: string;
+    tools: McpTool[];
+    onMcpEndpointChange: (url: string) => void;
+    onMcpConnect: () => void;
   }
-  let { open, onClose, engineLoaded }: Props = $props();
+  let {
+    open,
+    onClose,
+    engineLoaded,
+    mcpEndpoint,
+    mcpStatus,
+    mcpError,
+    tools,
+    onMcpEndpointChange,
+    onMcpConnect,
+  }: Props = $props();
 
   const ctxOptions: ContextSize[] = ['auto', 4096, 8192, 16384, 32768];
   const slidingOptions: SlidingSize[] = ['off', 1024, 2048, 4096, 8192];
@@ -137,6 +160,44 @@
       <p class="desc">Last-resort fallback when the transcript outgrows context: keep only the last N tokens in attention, drop older. Less ideal for tool-calling (the model loses earlier observations) but prevents hard failures.</p>
     </div>
 
+    <!-- ============ MCP ============ -->
+    <div class="section-label">MCP ENDPOINT</div>
+    <p class="desc">
+      The local satchel MCP. Defaults to this server's <code>/mcp</code> route — change only if you're proxying through another endpoint.
+    </p>
+    <input
+      type="text"
+      class="select"
+      value={mcpEndpoint}
+      onchange={(e) => onMcpEndpointChange((e.target as HTMLInputElement).value)}
+    />
+    <div class="btn-row">
+      <button class="btn btn-secondary btn-sm" type="button" onclick={onMcpConnect}>RECONNECT</button>
+      <span class="mcp-status">
+        {#if mcpStatus === 'connected'}
+          <Dot tone="teal" /> connected · {tools.length} tool{tools.length === 1 ? '' : 's'}
+        {:else if mcpStatus === 'connecting'}
+          <Dot tone="amber" pulse /> connecting…
+        {:else if mcpStatus === 'error'}
+          <Dot tone="danger" /> {mcpError ?? 'error'}
+        {:else}
+          <Dot tone="dim" /> idle
+        {/if}
+      </span>
+    </div>
+
+    {#if tools.length > 0}
+      <div class="section-label">TOOLS <span class="count">{tools.length}</span></div>
+      <div class="tool-list">
+        {#each tools as t (t.name)}
+          <div class="tool">
+            <div class="tname">{t.name}</div>
+            {#if t.description}<div class="tdesc">{t.description}</div>{/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <!-- ============ Persistence ============ -->
     <div class="section-label">PERSISTENCE</div>
 
@@ -194,6 +255,40 @@
     text-transform: none;
     flex: none;
   }
+  .section-label .count {
+    color: var(--teal);
+    font-weight: 700;
+    flex: none;
+  }
+  .desc code {
+    color: var(--teal);
+    background: var(--teal-soft);
+    padding: 1px 5px;
+    font-size: 11px;
+  }
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .mcp-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+  .tool-list { display: flex; flex-direction: column; gap: 6px; }
+  .tool {
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+  }
+  .tname { color: var(--teal); font-weight: 700; font-size: 11px; }
+  .tdesc { color: var(--text-dim); font-size: 10px; line-height: 1.5; margin-top: 3px; }
 
   .row { display: flex; flex-direction: column; gap: 6px; }
   .row.disabled { opacity: 0.5; }
