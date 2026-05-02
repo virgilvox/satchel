@@ -145,13 +145,15 @@ jobs:
             <key>NSHighResolutionCapable</key>   <true/>
             <key>LSUIElement</key>               <false/>
             <!--
-              SATCHEL binds port 7428 — only one instance can run at a
-              time. Telling LaunchServices we're single-instance makes
-              double-clicking the app while it's already running just
-              focus the existing process, instead of trying to spawn a
-              second copy that fails with macOS error -47 (file busy).
+              Single-instance behavior is now enforced at the Rust level:
+              if port 7428 is already bound, the second copy opens the
+              browser to the running instance and exits cleanly. We
+              previously set `LSMultipleInstancesProhibited` here, but
+              that routes launches through LaunchServices, which breaks
+              the standard Gatekeeper "Open Anyway" flow when the bundle
+              has stale registrations from prior versions and surfaces as
+              "file not found" with no recovery dialog.
             -->
-            <key>LSMultipleInstancesProhibited</key> <true/>
           </dict>
           </plist>
           PLIST

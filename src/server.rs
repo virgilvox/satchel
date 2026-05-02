@@ -138,14 +138,35 @@ pub async fn serve(
     let app = build_router(db, embedder, port, vault_path);
 
     let addr = format!("127.0.0.1:{port}");
-    eprintln!("[satchel] Web UI:       http://{addr}");
-    eprintln!("[satchel] MCP endpoint: http://{addr}/mcp");
-    eprintln!("[satchel] REST API:     http://{addr}/api/");
+    let url = format!("http://{addr}");
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    // Single-instance enforcement at the Rust level (was previously
+    // `LSMultipleInstancesProhibited` in the macOS Info.plist, but that
+    // hands the launch decision to LaunchServices and breaks the
+    // standard Gatekeeper "Open Anyway" flow when the bundle has stale
+    // registrations). Bind first; if the port is already taken, it's
+    // because another SATCHEL is already running. Open the browser to
+    // that running instance's UI and exit cleanly so a second click on
+    // the .app behaves like "bring it forward."
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("[satchel] Another SATCHEL is already running on {addr}.");
+            eprintln!("[satchel] Opening the existing instance's web UI: {url}");
+            if open_in_browser {
+                let _ = open_url(&url);
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    eprintln!("[satchel] Web UI:       {url}");
+    eprintln!("[satchel] MCP endpoint: {url}/mcp");
+    eprintln!("[satchel] REST API:     {url}/api/");
 
     if open_in_browser {
-        let url = format!("http://{addr}");
+        let url = url.clone();
         tokio::spawn(async move {
             // Tiny delay so axum is actually accepting before the browser hits.
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;

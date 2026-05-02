@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.2.2 — 2026-05-02
+
+### Reverted LSMultipleInstancesProhibited; single-instance now Rust-side
+
+v2.1.3 added `LSMultipleInstancesProhibited` to the macOS Info.plist to
+fix error -47 (file busy) when re-launching while a previous SATCHEL
+was still running. That fix was wrong: it hands the launch decision to
+LaunchServices, which on Macs that have downloaded multiple SATCHEL
+versions ends up with stale registrations for `com.satchel.app` at
+paths that no longer exist. LaunchServices errors out with "file not
+found" before Gatekeeper ever shows the standard "cannot be opened
+because Apple cannot check it for malicious software / Open Anyway"
+dialog, leaving users with no recovery path from the Finder side.
+
+The plist key is gone in v2.2.2. Single-instance enforcement now lives
+in `server::serve`: if `tokio::net::TcpListener::bind("127.0.0.1:7428")`
+returns `AddrInUse`, the second copy prints a one-liner and opens the
+browser to the running instance's UI, then exits cleanly. Same UX as
+LaunchServices "activate existing instance" without the LaunchServices
+side effects, and Gatekeeper sees a normal launch so the "Open Anyway"
+path works again on quarantined fresh downloads.
+
+If your Mac has accumulated stale registrations from earlier 2.x
+releases, one-shot cleanup:
+
+```
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f /path/to/Satchel.app
+```
+
+re-registers the current bundle as the canonical `com.satchel.app`.
+
 ## v2.2.1 — 2026-05-02
 
 ### CI fmt re-flow
