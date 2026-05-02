@@ -248,8 +248,27 @@ impl Database {
         offset: usize,
         filter_source: Option<&str>,
         filter_tags: Option<&[&str]>,
+        filter_collection: Option<i64>,
     ) -> Result<SearchPage> {
         let conn = self.conn.lock().unwrap();
+
+        // Pre-resolve collection membership once. An empty collection (or a
+        // bad id) yields an empty set, which makes the filter return zero
+        // results — that is the correct semantic, not an error.
+        // documents.id is TEXT (uuid-like), so the set is keyed by String.
+        let collection_doc_ids: Option<std::collections::HashSet<String>> = if let Some(cid) =
+            filter_collection
+        {
+            let mut stmt = conn
+                .prepare("SELECT document_id FROM document_collections WHERE collection_id = ?")?;
+            let ids: std::collections::HashSet<String> = stmt
+                .query_map(params![cid], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Some(ids)
+        } else {
+            None
+        };
 
         let mut by_chunk: std::collections::HashMap<String, FusedRow> =
             std::collections::HashMap::new();
@@ -261,7 +280,7 @@ impl Database {
         // products; <10ms on commodity hardware.
         let dense: Vec<(String, f32)> = {
             let mut stmt = conn.prepare(
-                "SELECT c.id, c.text, d.source_path, c.chunk_index, c.embedding,
+                "SELECT c.id, c.text, d.source_path, d.id, c.chunk_index, c.embedding,
                         COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags
                  FROM chunks c
                  JOIN documents d ON d.id = c.document_id
@@ -273,15 +292,16 @@ impl Database {
             let rows: Vec<(String, FusedRow, f32)> = stmt
                 .query_map([], |row| {
                     let id: String = row.get(0)?;
-                    let embedding_blob: Vec<u8> = row.get(4)?;
+                    let embedding_blob: Vec<u8> = row.get(5)?;
                     let embedding = blob_to_embedding(&embedding_blob);
                     let score = cosine_similarity(query_embedding, &embedding);
                     let fr = FusedRow {
                         text: row.get(1)?,
                         source: row.get(2)?,
-                        chunk_index: row.get::<_, i64>(3)? as usize,
+                        document_id: row.get(3)?,
+                        chunk_index: row.get::<_, i64>(4)? as usize,
                         tags: row
-                            .get::<_, String>(5)?
+                            .get::<_, String>(6)?
                             .split(',')
                             .filter(|s| !s.is_empty())
                             .map(String::from)
@@ -315,7 +335,7 @@ impl Database {
                          ORDER BY bm25
                          LIMIT ?2
                      )
-                     SELECT c.id, c.text, d.source_path, c.chunk_index,
+                     SELECT c.id, c.text, d.source_path, d.id, c.chunk_index,
                             COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags,
                             fts.bm25 AS score
                      FROM fts
@@ -332,9 +352,10 @@ impl Database {
                         let fr = FusedRow {
                             text: row.get(1)?,
                             source: row.get(2)?,
-                            chunk_index: row.get::<_, i64>(3)? as usize,
+                            document_id: row.get(3)?,
+                            chunk_index: row.get::<_, i64>(4)? as usize,
                             tags: row
-                                .get::<_, String>(4)?
+                                .get::<_, String>(5)?
                                 .split(',')
                                 .filter(|s| !s.is_empty())
                                 .map(String::from)
@@ -371,6 +392,10 @@ impl Database {
         let mut fused: Vec<SearchResult> = by_chunk
             .into_iter()
             .filter(|(_, fr)| fr.rrf > 0.0)
+            .filter(|(_, fr)| match &collection_doc_ids {
+                Some(ids) => ids.contains(&fr.document_id),
+                None => true,
+            })
             .map(|(_, fr)| SearchResult {
                 text: fr.text,
                 source: fr.source,
@@ -823,18 +848,13 @@ impl Database {
 
     /// Add every document at the given source_paths to a collection.
     /// Convenience for the Documents-tab bulk-move UI.
-    pub fn collection_add_source_paths(
-        &self,
-        id: i64,
-        source_paths: &[String],
-    ) -> Result<usize> {
+    pub fn collection_add_source_paths(&self, id: i64, source_paths: &[String]) -> Result<usize> {
         if source_paths.is_empty() {
             return Ok(0);
         }
         let placeholders = vec!["?"; source_paths.len()].join(",");
         let conn = self.conn.lock().unwrap();
-        let sql =
-            format!("SELECT id FROM documents WHERE source_path IN ({placeholders})");
+        let sql = format!("SELECT id FROM documents WHERE source_path IN ({placeholders})");
         let mut stmt = conn.prepare(&sql)?;
         let p: Vec<&dyn rusqlite::ToSql> = source_paths
             .iter()
@@ -859,8 +879,7 @@ impl Database {
         }
         let placeholders = vec!["?"; source_paths.len()].join(",");
         let conn = self.conn.lock().unwrap();
-        let sql =
-            format!("SELECT id FROM documents WHERE source_path IN ({placeholders})");
+        let sql = format!("SELECT id FROM documents WHERE source_path IN ({placeholders})");
         let mut stmt = conn.prepare(&sql)?;
         let p: Vec<&dyn rusqlite::ToSql> = source_paths
             .iter()
@@ -974,6 +993,7 @@ fn escape_like(s: &str) -> String {
 struct FusedRow {
     text: String,
     source: String,
+    document_id: String,
     chunk_index: usize,
     tags: Vec<String>,
     rrf: f32,
@@ -1194,7 +1214,9 @@ mod tests {
             .unwrap();
 
         let query = vec![1.0, 0.0, 0.0];
-        let page = db.search(&query, "chunk text", 5, 0, None, None).unwrap();
+        let page = db
+            .search(&query, "chunk text", 5, 0, None, None, None)
+            .unwrap();
         assert_eq!(page.results.len(), 1);
         assert_eq!(page.total, 1);
         assert_eq!(page.results[0].text, "chunk text");
@@ -1235,9 +1257,12 @@ mod tests {
         assert!(db.create_collection("Work").is_err());
 
         // Seed two source paths
-        db.insert_document("d1", "/work/a.md", "md", None, "x", "h").unwrap();
-        db.insert_document("d2", "/work/b.md", "md", None, "y", "h").unwrap();
-        db.insert_document("d3", "/personal/diary.md", "md", None, "z", "h").unwrap();
+        db.insert_document("d1", "/work/a.md", "md", None, "x", "h")
+            .unwrap();
+        db.insert_document("d2", "/work/b.md", "md", None, "y", "h")
+            .unwrap();
+        db.insert_document("d3", "/personal/diary.md", "md", None, "z", "h")
+            .unwrap();
 
         // Assign by source path
         db.collection_add_source_paths(work, &["/work/a.md".into(), "/work/b.md".into()])
@@ -1257,15 +1282,20 @@ mod tests {
         assert_eq!(personal_info.document_count, 1);
 
         // list_sources collection filter narrows the result
-        let work_sources = db.list_sources(None, None, "name", 100, 0, Some(work)).unwrap();
+        let work_sources = db
+            .list_sources(None, None, "name", 100, 0, Some(work))
+            .unwrap();
         assert_eq!(work_sources.total, 2);
-        let personal_sources = db.list_sources(None, None, "name", 100, 0, Some(personal)).unwrap();
+        let personal_sources = db
+            .list_sources(None, None, "name", 100, 0, Some(personal))
+            .unwrap();
         assert_eq!(personal_sources.total, 1);
         let all_sources = db.list_sources(None, None, "name", 100, 0, None).unwrap();
         assert_eq!(all_sources.total, 3);
 
         // Unassign + delete
-        db.collection_remove_source_paths(work, &["/work/a.md".into()]).unwrap();
+        db.collection_remove_source_paths(work, &["/work/a.md".into()])
+            .unwrap();
         let after = db.collection_source_paths(work).unwrap();
         assert_eq!(after, vec!["/work/b.md"]);
 
@@ -1290,7 +1320,9 @@ mod tests {
         assert_eq!(all.sources.len(), 2);
         assert_eq!(all.total, 2);
 
-        let md_only = db.list_sources(Some("md"), None, "name", 100, 0, None).unwrap();
+        let md_only = db
+            .list_sources(Some("md"), None, "name", 100, 0, None)
+            .unwrap();
         assert_eq!(md_only.sources.len(), 1);
         assert_eq!(md_only.sources[0].file_type, "md");
 
@@ -1328,7 +1360,7 @@ mod tests {
             .unwrap();
 
         let page = db
-            .search(&emb, "notes chunk", 10, 0, Some("/notes/"), None)
+            .search(&emb, "notes chunk", 10, 0, Some("/notes/"), None, None)
             .unwrap();
         assert_eq!(page.results.len(), 1);
         assert!(page.results[0].source.contains("/notes/"));
@@ -1340,9 +1372,49 @@ mod tests {
     fn test_search_empty_database() {
         let db = Database::open_memory().unwrap();
         let query = vec![1.0, 0.0, 0.0];
-        let page = db.search(&query, "anything", 5, 0, None, None).unwrap();
+        let page = db
+            .search(&query, "anything", 5, 0, None, None, None)
+            .unwrap();
         assert!(page.results.is_empty());
         assert_eq!(page.total, 0);
+    }
+
+    #[test]
+    fn test_search_filter_by_collection() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/work/a.md", "md", None, "a", "h1")
+            .unwrap();
+        db.insert_document("d2", "/personal/b.md", "md", None, "b", "h2")
+            .unwrap();
+
+        let emb = vec![1.0, 0.0];
+        db.insert_chunk("c1", "d1", 0, "shared term", 5, 0, 5, &emb)
+            .unwrap();
+        db.insert_chunk("c2", "d2", 0, "shared term", 5, 0, 5, &emb)
+            .unwrap();
+
+        let work = db.create_collection("Work").unwrap();
+        db.collection_add_source_paths(work, &["/work/a.md".into()])
+            .unwrap();
+
+        // Unfiltered: both chunks come back.
+        let all = db.search(&emb, "shared", 10, 0, None, None, None).unwrap();
+        assert_eq!(all.results.len(), 2);
+
+        // Scoped to the Work collection: only the work doc's chunk.
+        let scoped = db
+            .search(&emb, "shared", 10, 0, None, None, Some(work))
+            .unwrap();
+        assert_eq!(scoped.results.len(), 1);
+        assert!(scoped.results[0].source.contains("/work/"));
+
+        // Empty collection (id with no members) returns zero, not an error.
+        let empty = db.create_collection("Empty").unwrap();
+        let none = db
+            .search(&emb, "shared", 10, 0, None, None, Some(empty))
+            .unwrap();
+        assert!(none.results.is_empty());
+        assert_eq!(none.total, 0);
     }
 
     #[test]
@@ -1361,7 +1433,7 @@ mod tests {
         db.add_tag("d1", "important").unwrap();
 
         let page = db
-            .search(&emb, "chunk", 10, 0, None, Some(&["important"]))
+            .search(&emb, "chunk", 10, 0, None, Some(&["important"]), None)
             .unwrap();
         assert_eq!(page.results.len(), 1);
         assert!(page.results[0].source.contains("a.md"));
@@ -1465,7 +1537,7 @@ mod tests {
         }
 
         let page = db
-            .search(&query_emb, "lumencanvas", 5, 0, None, None)
+            .search(&query_emb, "lumencanvas", 5, 0, None, None, None)
             .unwrap();
         assert!(
             page.results.iter().any(|r| r.text.contains("lumencanvas")),
@@ -1507,12 +1579,12 @@ mod tests {
             .unwrap();
         }
 
-        let p1 = db.search(&emb, "shared", 5, 0, None, None).unwrap();
+        let p1 = db.search(&emb, "shared", 5, 0, None, None, None).unwrap();
         assert_eq!(p1.results.len(), 5);
         assert_eq!(p1.total, 15);
         assert_eq!(p1.offset, 0);
 
-        let p2 = db.search(&emb, "shared", 5, 5, None, None).unwrap();
+        let p2 = db.search(&emb, "shared", 5, 5, None, None, None).unwrap();
         assert_eq!(p2.results.len(), 5);
         assert_eq!(p2.total, 15);
 
@@ -1524,7 +1596,7 @@ mod tests {
         }
 
         // Final page; offset past total returns empty without panic.
-        let p4 = db.search(&emb, "shared", 5, 100, None, None).unwrap();
+        let p4 = db.search(&emb, "shared", 5, 100, None, None, None).unwrap();
         assert!(p4.results.is_empty());
         assert_eq!(p4.total, 15);
     }
@@ -1569,7 +1641,15 @@ mod tests {
             .unwrap();
 
         let page = db
-            .search(&query_emb, "target chunk", 5, 0, Some("/target/"), None)
+            .search(
+                &query_emb,
+                "target chunk",
+                5,
+                0,
+                Some("/target/"),
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             !page.results.is_empty(),
@@ -1777,14 +1857,14 @@ mod tests {
             .unwrap();
 
         let page = db
-            .search(&[1.0], "uniqueword12345", 5, 0, None, None)
+            .search(&[1.0], "uniqueword12345", 5, 0, None, None, None)
             .unwrap();
         assert_eq!(page.results.len(), 1);
 
         db.delete_by_path_exact("/a.md", false).unwrap();
 
         let page = db
-            .search(&[1.0], "uniqueword12345", 5, 0, None, None)
+            .search(&[1.0], "uniqueword12345", 5, 0, None, None, None)
             .unwrap();
         assert!(
             page.results.is_empty(),

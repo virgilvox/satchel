@@ -39,8 +39,13 @@ async function deleteJson<T>(url: string, body: unknown): Promise<T> {
 export const api = {
   status: () => getJson<StatusResponse>('/api/status'),
 
-  search: (query: string, top_k = 20, offset = 0) =>
-    postJson<SearchPage>('/api/search', { query, top_k, offset }),
+  search: (query: string, top_k = 20, offset = 0, collection_id?: number) =>
+    postJson<SearchPage>('/api/search', {
+      query,
+      top_k,
+      offset,
+      ...(collection_id != null ? { collection_id } : {}),
+    }),
 
   sources: (params: {
     q?: string;

@@ -96,8 +96,14 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
             axum::routing::delete(api_mcp_servers_delete),
         )
         .route("/api/mcp/proxy/:id", post(api_mcp_proxy))
-        .route("/api/collections", get(api_collections_list).post(api_collections_create))
-        .route("/api/collections/:id", axum::routing::delete(api_collections_delete))
+        .route(
+            "/api/collections",
+            get(api_collections_list).post(api_collections_create),
+        )
+        .route(
+            "/api/collections/:id",
+            axum::routing::delete(api_collections_delete),
+        )
         .route(
             "/api/collections/:id/sources",
             post(api_collection_assign).delete(api_collection_unassign),
@@ -263,6 +269,8 @@ struct SearchRequest {
     /// Pagination offset (default 0).
     offset: Option<usize>,
     filter_source: Option<String>,
+    /// Restrict results to chunks whose document is in this collection.
+    collection_id: Option<i64>,
 }
 
 async fn api_search(
@@ -284,6 +292,7 @@ async fn api_search(
         offset,
         req.filter_source.as_deref(),
         None,
+        req.collection_id,
     ) {
         Ok(page) => Json(json!({
             "results": page.results,
@@ -1105,7 +1114,10 @@ async fn api_collection_unassign(
     AxPath(id): AxPath<i64>,
     Json(req): Json<CollectionSourcesRequest>,
 ) -> Json<Value> {
-    match state.db.collection_remove_source_paths(id, &req.source_paths) {
+    match state
+        .db
+        .collection_remove_source_paths(id, &req.source_paths)
+    {
         Ok(n) => Json(json!({ "removed": n })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }

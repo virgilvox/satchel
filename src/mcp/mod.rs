@@ -37,7 +37,7 @@ pub fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "search_knowledge",
-                "description": "Semantic search across the entire knowledge vault. Returns the most relevant chunks with source attribution.",
+                "description": "Semantic search across the knowledge vault. Returns the most relevant chunks with source attribution. Pass `collection_name` (or `collection_id`) to scope the search to a single named collection (e.g. \"Work notes\").",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -58,6 +58,14 @@ pub fn tool_definitions() -> Value {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Filter results to chunks with any of these tags"
+                        },
+                        "collection_name": {
+                            "type": "string",
+                            "description": "Restrict results to documents in this named collection. Case-sensitive exact match."
+                        },
+                        "collection_id": {
+                            "type": "integer",
+                            "description": "Numeric collection id. Prefer collection_name unless you already know the id."
                         }
                     },
                     "required": ["query"]
@@ -192,6 +200,24 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect());
 
+    // Accept either an explicit numeric id or a friendly name. Resolving by
+    // name here keeps the AI-facing surface ergonomic — agents almost always
+    // know the collection name from list_sources / vault_stats output, not
+    // its database id.
+    let filter_collection: Option<i64> = match args["collection_id"].as_i64() {
+        Some(id) => Some(id),
+        None => match args["collection_name"].as_str() {
+            Some(name) if !name.is_empty() => match db.list_collections() {
+                Ok(cs) => match cs.iter().find(|c| c.name == name) {
+                    Some(c) => Some(c.id),
+                    None => return tool_error(&format!("No collection named {name:?}")),
+                },
+                Err(e) => return tool_error(&format!("Collections lookup error: {e}")),
+            },
+            _ => None,
+        },
+    };
+
     let query_embedding = match embedder.embed(query) {
         Ok(emb) => emb,
         Err(e) => return tool_error(&format!("Embedding error: {e}")),
@@ -204,6 +230,7 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
         0,
         filter_source,
         filter_tags.as_deref(),
+        filter_collection,
     ) {
         Ok(r) => r,
         Err(e) => return tool_error(&format!("Search error: {e}")),

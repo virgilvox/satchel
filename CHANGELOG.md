@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.6.1 — 2026-05-01
+
+### Search scoped to a collection (REST + MCP)
+
+`db.search()`, `POST /api/search`, and the `search_knowledge` MCP tool
+now accept a collection scope. Documents-tab filtering already worked
+in v1.6.0; this lifts the same scope into the retrieval surface so AI
+agents and external API consumers can ask "the work notes" instead of
+"the totality."
+
+- `POST /api/search   { ..., collection_id: number }`
+- MCP `search_knowledge` arguments: `collection_name` (preferred — it
+  is the user-visible label) or `collection_id` (numeric id). An
+  unknown name returns a clear error so the agent can correct.
+- `web/src/lib/api.ts` `api.search()` accepts an optional
+  `collection_id` argument; existing call sites continue to scope to
+  the entire vault.
+
+Filter is applied post-fusion (same code path as `filter_source` /
+`filter_tags`), so RRF still ranks across the full vault before
+restricting to membership — quality unchanged, just narrower.
+
+Test added: `test_search_filter_by_collection` (147 lib tests passing,
+up from 146 in v1.6.0). It covers the scoped-results case, an empty
+collection (returns zero, not an error), and the unfiltered baseline.
+
+### Format fix
+
+`cargo fmt --all` cleanup that should have ridden along with v1.6.0.
+The Format CI step on main turned red on the v1.6.0 push; this brings
+it green again.
+
 ## v1.6.0 — 2026-05-01
 
 ### Collections — named subsets of your vault
