@@ -66,6 +66,8 @@ Satchel.app/Contents/MacOS/satchel config
 
 …or symlink it onto your `$PATH` once: `ln -s "$PWD/Satchel.app/Contents/MacOS/satchel" /usr/local/bin/satchel`.
 
+> **macOS error `-47` ("can't be opened")** means a previous SATCHEL is still running and holding the binary — Finder refuses to launch a second copy that would overwrite it. v2.1.3+ bundles `LSMultipleInstancesProhibited` so re-clicking the icon focuses the running instance instead of failing. On older releases: `pkill -f satchel` then try again. If that doesn't clear it: `lsof -i :7428` to confirm nothing's still bound, then re-extract the zip and `xattr -dr com.apple.quarantine /Applications/Satchel.app` before opening.
+
 ### Windows
 
 Double-click the .zip to extract, then run `satchel-windows-x86_64.exe`. The SATCHEL mark is embedded in the .exe via a Windows resource — Explorer / Alt-Tab / Task Manager all show it without extra files.

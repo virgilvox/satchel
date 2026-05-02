@@ -144,6 +144,14 @@ jobs:
             <key>LSMinimumSystemVersion</key>    <string>10.15</string>
             <key>NSHighResolutionCapable</key>   <true/>
             <key>LSUIElement</key>               <false/>
+            <!--
+              SATCHEL binds port 7428 — only one instance can run at a
+              time. Telling LaunchServices we're single-instance makes
+              double-clicking the app while it's already running just
+              focus the existing process, instead of trying to spawn a
+              second copy that fails with macOS error -47 (file busy).
+            -->
+            <key>LSMultipleInstancesProhibited</key> <true/>
           </dict>
           </plist>
           PLIST

@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.1.3 — 2026-05-02
+
+### macOS error -47 on launch
+
+Double-clicking `Satchel.app` while an older instance was still running
+threw the Finder dialog "The application 'SATCHEL' can't be opened. -47"
+(macOS `fBsyErr`, "file busy"): the previous process held the binary
+inside `Contents/MacOS/`, so `LaunchServices` refused to launch a
+second copy that would overwrite it.
+
+Fixed in the bundle: `Info.plist` now sets
+
+```xml
+<key>LSMultipleInstancesProhibited</key>
+<true/>
+```
+
+so a second click focuses the running SATCHEL instead of trying to spawn
+a duplicate. SATCHEL binds port 7428 and a second copy would have failed
+on `bind()` anyway — this just makes the right thing happen instead of
+the confusing thing.
+
+README's macOS section gained a troubleshooting note covering the older-
+release recovery path (`pkill -f satchel`, `lsof -i :7428`, re-extract,
+`xattr -dr com.apple.quarantine`) for users still on v2.1.2 or earlier.
+
 ## v2.1.2 — 2026-05-02
 
 ### Update checker
