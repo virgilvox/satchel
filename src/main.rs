@@ -23,20 +23,87 @@ struct Cli {
 /// Resolve where SATCHEL keeps its vault when `--vault` isn't passed.
 ///
 /// Order:
-/// 1. `vault/` next to the binary, or — on macOS — next to the `.app`
+/// 1. `vault/` next to the binary, or, on macOS, next to the `.app`
 ///    bundle. Preserves the USB-stick deployment pattern where the binary
 ///    and vault travel together.
-/// 2. Platform data directory: `~/Library/Application Support/satchel` (macOS),
+/// 2. Last-known-good path saved on a previous successful run (recovers
+///    the user's vault when macOS App Translocation copies the .app to
+///    a randomized sandbox path so step 1 cannot find the sibling vault).
+/// 3. Platform data directory: `~/Library/Application Support/satchel` (macOS),
 ///    `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel` (Linux/BSD),
 ///    `%APPDATA%/satchel` (Windows).
-/// 3. `./vault` as a final fallback if no env vars are set.
+/// 4. `./vault` as a final fallback if no env vars are set.
 fn default_vault_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
+        if is_translocated(&exe) {
+            eprintln!(
+                "[satchel] Warning: running from macOS App Translocation sandbox\n  \
+                 ({}).\n  \
+                 The vault next to the .app bundle is invisible from here. \
+                 Quit, run `xattr -dr com.apple.quarantine /path/to/Satchel.app`, \
+                 then reopen.",
+                exe.display(),
+            );
+        }
         if let Some(p) = vault_next_to_exe(&exe) {
+            remember_vault_path(&p);
             return p;
         }
     }
+    if let Some(p) = recall_vault_path() {
+        eprintln!(
+            "[satchel] Using last-known vault from previous run: {}",
+            p.display()
+        );
+        return p;
+    }
     platform_data_dir().unwrap_or_else(|| PathBuf::from("vault"))
+}
+
+/// True when `exe` lives inside macOS's App Translocation sandbox. macOS
+/// applies translocation to quarantined apps the user has not moved
+/// since download, copying the .app to a randomized read-only path and
+/// running from there. Inside the sandbox, `current_exe()` no longer
+/// points at the user's filesystem and any sibling-vault probe fails.
+fn is_translocated(exe: &Path) -> bool {
+    exe.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| s == "AppTranslocation")
+    })
+}
+
+/// Path to the breadcrumb file that records the last vault we
+/// successfully opened from a sibling-of-the-binary location. Lives in
+/// the platform data dir so it survives across .app reinstalls.
+fn last_vault_breadcrumb() -> Option<PathBuf> {
+    platform_data_dir().map(|d| d.join("last-vault.txt"))
+}
+
+/// Save the resolved vault path so a future translocated launch can
+/// fall back to it. Best-effort; failure to create the breadcrumb is
+/// not fatal (the user's vault still works for this run).
+fn remember_vault_path(path: &Path) {
+    let Some(crumb) = last_vault_breadcrumb() else {
+        return;
+    };
+    if let Some(parent) = crumb.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&crumb, path.to_string_lossy().as_bytes());
+}
+
+/// Read the breadcrumb. Returns Some only if the saved path still
+/// exists, so a deleted vault directory does not haunt future launches.
+fn recall_vault_path() -> Option<PathBuf> {
+    let crumb = last_vault_breadcrumb()?;
+    let raw = std::fs::read_to_string(&crumb).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    if p.exists() { Some(p) } else { None }
 }
 
 /// Probe for a `vault/` directory deployed alongside the binary.
@@ -443,6 +510,23 @@ mod tests {
         let vault = tmp.path().join("vault");
         std::fs::create_dir(&vault).unwrap();
         assert_eq!(vault_next_to_exe(&exe), Some(vault));
+    }
+
+    #[test]
+    fn translocation_path_is_detected() {
+        // macOS sandbox path shape: /private/var/folders/.../AppTranslocation/<UUID>/d/Satchel.app/Contents/MacOS/satchel
+        let exe = PathBuf::from(
+            "/private/var/folders/pw/abc/T/AppTranslocation/EB180DAE-BC9E/d/Satchel.app/Contents/MacOS/satchel",
+        );
+        assert!(is_translocated(&exe));
+    }
+
+    #[test]
+    fn normal_path_is_not_translocated() {
+        let exe = PathBuf::from("/Applications/Satchel.app/Contents/MacOS/satchel");
+        assert!(!is_translocated(&exe));
+        let exe2 = PathBuf::from("/usr/local/bin/satchel");
+        assert!(!is_translocated(&exe2));
     }
 
     #[test]

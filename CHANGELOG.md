@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.3.2 — 2026-05-02
+
+### Recover the right vault after macOS App Translocation
+
+When a freshly downloaded `Satchel.app` is double-clicked while still
+quarantined, macOS copies it to a randomized read-only sandbox
+(`/private/var/folders/.../AppTranslocation/<UUID>/d/Satchel.app/`)
+and runs from there. `current_exe()` then points into the sandbox, the
+sibling-vault probe finds nothing, and SATCHEL silently falls through
+to `~/Library/Application Support/satchel/` and creates an empty
+default vault there. The user's real vault, sitting next to the
+original `.app`, sees no traffic.
+
+v2.3.2 fixes the recovery path:
+
+1. The binary writes a breadcrumb (`<data-dir>/last-vault.txt`) every
+   time it successfully resolves a sibling-of-the-binary vault. Future
+   launches that cannot find a sibling consult this file before
+   falling back to the data dir, so the second launch after a fresh
+   download lands on the right vault even if the .app is still
+   quarantined and translocated.
+2. When `current_exe()` is detected to be inside an `AppTranslocation`
+   path, the startup banner now prints a clear stderr warning naming
+   the cause and the fix (`xattr -dr com.apple.quarantine
+   /path/to/Satchel.app`).
+3. Added two unit tests covering the translocation-path detector
+   (positive path with a realistic sandbox path; negative paths for
+   `/Applications/...` and `/usr/local/bin/satchel`).
+
+The first launch after a fresh download still hits the empty
+data-dir vault (the binary cannot recover the original `.app` path
+from inside the sandbox; that is a macOS API gap, not something
+SATCHEL can solve in code). Subsequent launches recover, and the
+permanent fix remains: strip the quarantine xattr, or notarize.
+
 ## v2.3.1 — 2026-05-02
 
 ### Anthropic chat 400 fix + visible upstream errors
