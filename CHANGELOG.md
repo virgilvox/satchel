@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.2.1 — 2026-05-02
+
+### CI fmt re-flow
+
+`cargo fmt --check` tripped on v2.2.0 main. Removing the closure from
+the version-suffix split chain in `src/release.rs` shortened the chain
+enough that rustfmt now prefers a single line over a five-line dotted
+form. Pure whitespace, no behavior change; v2.2.0 binaries are
+byte-equivalent. v2.2.1 ships so the published source matches the
+release tag and CI is green going forward.
+
 ## v2.2.0 — 2026-05-02
 
 ### Relicensed under MIT
