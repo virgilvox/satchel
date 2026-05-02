@@ -2279,7 +2279,7 @@ mod proptests {
         ) {
             let b: Vec<f32> = a.iter().map(|x| x + 0.1).collect();
             let sim = cosine_similarity(&a, &b);
-            prop_assert!(sim >= -1.0 - 1e-5 && sim <= 1.0 + 1e-5, "Got {sim}");
+            prop_assert!((-1.0 - 1e-5..=1.0 + 1e-5).contains(&sim), "Got {sim}");
         }
 
         #[test]

@@ -2,7 +2,7 @@
   "name": "satchel-rag",
   "version": "0.1.0",
   "description": "Portable RAG system. Single binary, local embeddings, MCP protocol.",
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/virgilvox/satchel"

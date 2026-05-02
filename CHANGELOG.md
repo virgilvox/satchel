@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.2.0 — 2026-05-02
+
+### Relicensed under MIT
+
+SATCHEL is now MIT-licensed. The previous AGPL-3.0 + commercial-licensing
+exception is gone. `LICENSE`, `Cargo.toml`, `README.md`, `CONTRIBUTING.md`,
+and the npm package metadata all carry the MIT terms now. Existing users
+keep everything they had under AGPL plus the looser MIT permissions; no
+contributor agreement was in place, the copyright remains with the author.
+
+### macOS Satchel.app finds the vault next to the bundle
+
+USB-stick deployment on macOS was effectively broken since the .app bundle
+landed: `default_vault_path()` probed `<binary-dir>/vault/`, which inside a
+.app bundle resolves to `Satchel.app/Contents/MacOS/vault/`, never the
+`vault/` folder sitting next to `Satchel.app` on the drive. SATCHEL would
+silently fall through to `~/Library/Application Support/satchel/` and
+create an empty default vault there; users plugging in their stick saw an
+empty Dashboard while their records sat unused on disk.
+
+The resolver now also probes the directory that holds the .app bundle when
+the binary lives at `<dir>/Satchel.app/Contents/MacOS/satchel`. Linux and
+Windows behavior is unchanged. Four unit tests cover raw-binary, .app
+sibling, no-vault-found, and inner-vault-precedence cases.
+
+### Build and lint cleanup
+
+`scripts/build-all.sh` now passes `--features embed-model` (matching CI)
+and bails up front when `vault/models/bge-small-en-v1.5/*` are missing, so
+local cross-builds cannot silently produce binaries that fall back to the
+`Unavailable` embedder. Three clippy warnings cleared (`sort_by_key`,
+`RangeInclusive::contains`, `[','`/`'+']` slice pattern) plus a handful
+of unused-import / dead-code warnings in the integration-test scaffolding.
+A stale `bin/lib/libonnxruntime.dylib` (left over from before the candle
+migration) has been deleted from the working tree.
+
 ## v2.1.3 — 2026-05-02
 
 ### macOS error -47 on launch

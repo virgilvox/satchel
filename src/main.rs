@@ -23,22 +23,42 @@ struct Cli {
 /// Resolve where SATCHEL keeps its vault when `--vault` isn't passed.
 ///
 /// Order:
-/// 1. `<binary-dir>/vault/` if it exists — preserves the USB-stick deployment
-///    pattern where the binary and vault travel together.
+/// 1. `vault/` next to the binary, or — on macOS — next to the `.app`
+///    bundle. Preserves the USB-stick deployment pattern where the binary
+///    and vault travel together.
 /// 2. Platform data directory: `~/Library/Application Support/satchel` (macOS),
 ///    `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel` (Linux/BSD),
 ///    `%APPDATA%/satchel` (Windows).
 /// 3. `./vault` as a final fallback if no env vars are set.
 fn default_vault_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("vault");
-            if candidate.exists() {
-                return candidate;
-            }
+        if let Some(p) = vault_next_to_exe(&exe) {
+            return p;
         }
     }
     platform_data_dir().unwrap_or_else(|| PathBuf::from("vault"))
+}
+
+/// Probe for a `vault/` directory deployed alongside the binary.
+///
+/// Linux/Windows: `<binary-dir>/vault`. macOS: also check next to the
+/// containing `.app` bundle, since on macOS the binary lives at
+/// `Satchel.app/Contents/MacOS/satchel` — a USB-stick layout that puts
+/// `Satchel.app` and `vault/` as siblings would otherwise be invisible
+/// because `<binary-dir>/vault` resolves to `Contents/MacOS/vault`.
+fn vault_next_to_exe(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    let direct = parent.join("vault");
+    if direct.exists() {
+        return Some(direct);
+    }
+    if parent.ends_with("Contents/MacOS") {
+        let app_sibling = parent.parent()?.parent()?.parent()?.join("vault");
+        if app_sibling.exists() {
+            return Some(app_sibling);
+        }
+    }
+    None
 }
 
 fn platform_data_dir() -> Option<PathBuf> {
@@ -387,4 +407,57 @@ fn confirm(prompt: &str) -> Result<bool> {
     std::io::stdin().read_line(&mut input)?;
     let trimmed = input.trim().to_lowercase();
     Ok(trimmed == "y" || trimmed == "yes" || trimmed == "wipe")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn vault_next_to_raw_binary_is_found() {
+        let tmp = TempDir::new().unwrap();
+        let exe = tmp.path().join("satchel");
+        std::fs::write(&exe, b"").unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        assert_eq!(vault_next_to_exe(&exe), Some(vault));
+    }
+
+    #[test]
+    fn vault_missing_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let exe = tmp.path().join("satchel");
+        std::fs::write(&exe, b"").unwrap();
+        assert_eq!(vault_next_to_exe(&exe), None);
+    }
+
+    #[test]
+    fn vault_sibling_to_app_bundle_is_found() {
+        // /tmp/x/Satchel.app/Contents/MacOS/satchel + /tmp/x/vault
+        let tmp = TempDir::new().unwrap();
+        let macos_dir = tmp.path().join("Satchel.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos_dir).unwrap();
+        let exe = macos_dir.join("satchel");
+        std::fs::write(&exe, b"").unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        assert_eq!(vault_next_to_exe(&exe), Some(vault));
+    }
+
+    #[test]
+    fn direct_vault_inside_bundle_takes_precedence() {
+        // If somebody truly puts a `vault/` inside Contents/MacOS/, that
+        // wins over the .app sibling — first match in the probe order.
+        let tmp = TempDir::new().unwrap();
+        let macos_dir = tmp.path().join("Satchel.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos_dir).unwrap();
+        let exe = macos_dir.join("satchel");
+        std::fs::write(&exe, b"").unwrap();
+        let inner_vault = macos_dir.join("vault");
+        std::fs::create_dir(&inner_vault).unwrap();
+        let outer_vault = tmp.path().join("vault");
+        std::fs::create_dir(&outer_vault).unwrap();
+        assert_eq!(vault_next_to_exe(&exe), Some(inner_vault));
+    }
 }

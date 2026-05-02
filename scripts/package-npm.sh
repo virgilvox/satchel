@@ -77,7 +77,7 @@ for platform in "${!PLATFORM_MAP[@]}"; do
   "name": "${pkg_name}",
   "version": "${VERSION}",
   "description": "SATCHEL binary for ${platform}",
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/virgilvox/satchel"

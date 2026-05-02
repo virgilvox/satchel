@@ -40,7 +40,7 @@ pub fn list_vaults_info(base_path: &Path) -> Result<Vec<VaultListEntry>> {
             size_human: humanize_bytes(size_bytes),
         });
     }
-    out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    out.sort_by_key(|v| std::cmp::Reverse(v.size_bytes));
     Ok(out)
 }
 

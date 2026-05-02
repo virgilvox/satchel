@@ -1,6 +1,5 @@
 mod common;
 
-use satchel_rag::embed::Embedder;
 use satchel_rag::mcp::{self, JsonRpcRequest};
 use serde_json::{json, Value};
 
@@ -49,9 +48,9 @@ async fn test_mcp_search_with_seeded_data() {
     let result = mcp::handle_request(&req, &db, &embedder).await;
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Result 1"));
-    assert!(!result
+    assert!(result
         .get("isError")
-        .is_some_and(|v| v.as_bool() == Some(true)));
+        .is_none_or(|v| v.as_bool() != Some(true)));
 }
 
 #[tokio::test]

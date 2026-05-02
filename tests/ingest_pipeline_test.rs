@@ -1,7 +1,6 @@
 mod common;
 
 use satchel_rag::ingest::{self, IngestConfig, Progress};
-use std::io::Write;
 use tempfile::TempDir;
 
 fn config() -> IngestConfig {

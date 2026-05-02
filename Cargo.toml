@@ -1,9 +1,9 @@
 [package]
 name = "satchel-rag"
-version = "2.1.3"
+version = "2.2.0"
 edition = "2021"
 description = "Portable RAG system on a USB drive. Single binary, local embeddings, MCP protocol."
-license = "AGPL-3.0-only"
+license = "MIT"
 repository = "https://github.com/virgilvox/satchel"
 homepage = "https://github.com/virgilvox/satchel"
 readme = "README.md"

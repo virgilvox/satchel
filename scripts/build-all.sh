@@ -16,6 +16,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
 OUT_DIR="${PROJECT_DIR}/bin"
 
+# `embed-model` reads vault/models/bge-small-en-v1.5/* via include_bytes!
+# at compile time. CI does this in release.yml; local builds need the model
+# already on disk. Bail loudly so users don't ship binaries that silently
+# fall back to the "Unavailable" embedder.
+MODEL_DIR="${PROJECT_DIR}/vault/models/bge-small-en-v1.5"
+for f in model.safetensors tokenizer.json config.json; do
+    if [[ ! -f "${MODEL_DIR}/${f}" ]]; then
+        echo "error: ${MODEL_DIR}/${f} missing — run scripts/download-model.sh first" >&2
+        exit 1
+    fi
+done
+
 mkdir -p "${OUT_DIR}"
 
 for target in "${TARGETS[@]}"; do
@@ -24,7 +36,7 @@ for target in "${TARGETS[@]}"; do
     # Install target if needed
     rustup target add "${target}" 2>/dev/null || true
 
-    cargo build --release --target "${target}" \
+    cargo build --release --features embed-model --target "${target}" \
         --manifest-path "${PROJECT_DIR}/Cargo.toml"
 
     # Copy binary with platform-friendly name

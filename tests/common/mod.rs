@@ -1,3 +1,8 @@
+// Each test binary that does `mod common;` only uses a subset of these
+// helpers. Without this, `dead_code` fires per-binary on whichever helpers
+// that binary doesn't happen to call.
+#![allow(dead_code)]
+
 use satchel_rag::embed::Embedder;
 use satchel_rag::rag::Database;
 

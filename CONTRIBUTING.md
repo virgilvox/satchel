@@ -106,4 +106,4 @@ marked accordingly.
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
-AGPL-3.0 license. See [LICENSE](LICENSE) for details.
+MIT license. See [LICENSE](LICENSE) for details.

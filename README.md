@@ -316,4 +316,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[AGPL-3.0-only](LICENSE). For commercial licensing, visit [hack.build](https://hack.build).
+[MIT](LICENSE).
