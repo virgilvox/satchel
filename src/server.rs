@@ -1005,6 +1005,38 @@ async fn api_anthropic_messages(
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
+
+    // Errors from Anthropic come back as a single JSON body, not an SSE
+    // stream. Buffer + log them so they show up in the satchel terminal
+    // instead of disappearing into the streaming pipe; pass the same
+    // body through to the browser so the chat can render the message.
+    let status = upstream.status();
+    if !status.is_success() {
+        let headers = upstream.headers().clone();
+        let body_bytes = match upstream.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("anthropic upstream read failed: {e}"),
+                );
+            }
+        };
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        tracing::warn!(
+            status = %status,
+            body = %body_str,
+            "anthropic upstream returned non-success status",
+        );
+        let mut builder = Response::builder().status(status);
+        if let Some(ct) = headers.get("content-type") {
+            builder = builder.header("content-type", ct);
+        }
+        return builder
+            .body(Body::from(body_bytes))
+            .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "build failed"));
+    }
+
     forward_streaming_response(upstream)
 }
 

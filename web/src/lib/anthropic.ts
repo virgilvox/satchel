@@ -1,4 +1,6 @@
 // Client for the satchel-side Anthropic Messages proxy.
+
+import { errMessage } from './errors';
 //
 // The browser POSTs to `/api/anthropic/messages`; satchel adds the
 // `x-api-key` + `anthropic-version` headers from the saved config and
@@ -105,11 +107,15 @@ export async function streamAnthropicTurn(
   if (req.tools?.length) wire.tools = req.tools;
   if (req.system) {
     if (req.cache) {
+      // Default 5-minute TTL — no beta header required, fits chat
+      // perfectly (most follow-up turns land within minutes). The 1h
+      // TTL is gated behind the `extended-cache-ttl-2025-04-11` beta
+      // header on raw HTTP and was returning 400s without it.
       wire.system = [
         {
           type: 'text',
           text: req.system,
-          cache_control: { type: 'ephemeral', ttl: '1h' },
+          cache_control: { type: 'ephemeral' },
         },
       ];
     } else {
@@ -130,10 +136,14 @@ export async function streamAnthropicTurn(
     signal,
   });
   if (!res.ok) {
+    // Anthropic's error body is `{type: "error", error: {type, message}}`.
+    // The proxy passes it straight through. Use errMessage to dig out
+    // the inner `.error.message` so the chat shows something useful
+    // instead of "[object Object]".
     let detail = '';
     try {
       const j = await res.json();
-      detail = (j as { error?: string }).error ?? JSON.stringify(j);
+      detail = errMessage(j);
     } catch {
       detail = await res.text().catch(() => '');
     }

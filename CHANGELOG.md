@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.3.1 — 2026-05-02
+
+### Anthropic chat 400 fix + visible upstream errors
+
+v2.3.0's Anthropic mode sent `cache_control: {type: "ephemeral", ttl:
+"1h"}` on the system prompt. The 1-hour TTL is gated behind the
+`extended-cache-ttl-2025-04-11` beta header on raw HTTP, and the proxy
+was not sending it; Anthropic returned 400 on every chat turn. The
+default 5-minute TTL (no beta header required) is plenty for a chat
+session, so v2.3.1 drops the explicit `ttl` field. Caching still works.
+
+The 400s were also rendering in the chat as
+`anthropic proxy 400: [object Object]` because the response is
+`{type: "error", error: {type, message}}` and the inline extractor was
+treating the inner object as a string. Routes through the existing
+`errMessage` helper now and shows the actual upstream message.
+
+The proxy now also buffers + logs upstream non-success responses
+instead of streaming them blind. Anthropic's error JSON shows up in
+the satchel terminal as a `tracing::warn` with status + body, so the
+next time the API rejects something, the cause is one log line away.
+
 ## v2.3.0 — 2026-05-02
 
 ### Settings modal: tabs, deep-linking, mode-aware controls
