@@ -77,11 +77,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
         let mut it = s.split('.').map(|p| {
             // Strip pre-release / build suffixes (-rc.1, +sha) so a tag
             // like "2.1.1-beta" still compares cleanly against 2.1.0.
-            p.split(['-', '+'])
-                .next()
-                .unwrap_or("")
-                .parse::<u64>()
-                .ok()
+            p.split(['-', '+']).next().unwrap_or("").parse::<u64>().ok()
         });
         Some((
             it.next()??,
