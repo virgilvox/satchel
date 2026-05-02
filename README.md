@@ -157,16 +157,50 @@ Then in claude.ai → Settings → Connectors → Add Custom Connector, point it
 
 Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428):
 
-- **Dashboard** — vault stats, quick search.
-- **Ask** — conversational entry to the vault. Phrase a question and a tool-call card calls `search_knowledge` against the vault, returning the top passages inline with source attribution. Pure retrieval — no external LLM, no network roundtrip.
-- **Chat** — full in-browser LLM with tool calling against the local MCP server. Pick a small model (Qwen3, Llama 3.2 1B/3B, Phi-3.5 mini), it loads via WebGPU and caches in your browser, then chats over your vault using the same MCP tools (`search_knowledge`, `list_sources`, `get_document`, `list_tags`, `vault_stats`). Reasoning blocks render in a collapsible panel; tool calls render as teal-bordered cards inline with the assistant turn. Models that emit `<think>...</think>` are rendered with the reasoning isolated. *(Status: scaffolded; first model picker + WebLLM integration in progress — see [issues](https://github.com/virgilvox/satchel/issues) for the roadmap.)*
+- **Dashboard** — vault stats, quick search, embedding-model status.
+- **Ask** — conversational entry to the vault. Phrase a question; a tool-call card runs `search_knowledge` and returns the top passages with source attribution. Pure retrieval — no LLM, no network roundtrip.
+- **Chat** — picker spans two backends. **Local · WebLLM** runs a small model (Llama 3.2 1B/3B, Hermes 3, Qwen 2.5, Phi 3.5, Gemma 2, DeepSeek R1, …) entirely in your browser via WebGPU; output is locked to a per-tool JSON schema by an XGrammar logit mask. **Anthropic API** (Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5) streams through a server-side proxy with your saved API key — see *Settings → Anthropic API*. Tool calls go to the same MCPs either way. Reasoning blocks emitted as `<think>…</think>` render in a collapsible panel; tool calls render compact (collapsed by default) and expand on click.
 - **Search** — full hybrid retrieval with score ranking.
-- **Documents** — browse ingested files.
-- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. Multiple folders can run concurrently and progress is tracked live (files seen, records added/skipped/failed, current file, elapsed time).
+- **Documents** — browse ingested files. Group sources into **collections** (named subsets like "Work", "Research", "Personal"), filter by collection with a tab strip, multi-select rows + bulk move into a collection.
+- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. Multiple folders run concurrently with live progress (files seen, records added/skipped/failed, current file, elapsed time).
 - **Manage** — delete documents by path prefix or file type, or wipe the vault.
-- **Connect** — config snippets for every supported AI client.
+- **Connect** — one-click public tunnel via bundled `cloudflared` (anonymous quick tunnel or your own named tunnel from Cloudflare Zero Trust), plus config snippets for Claude Desktop, Claude Code, Cursor, claude.ai web.
+
+Settings (gear icon in the chat strip) carries:
+- generation knobs (temperature, max_tokens, max_rounds), agent backstops (min_tool_calls, weak_score_threshold), context window + sliding window, persistence toggles
+- **Anthropic API key** — paste once, stored at `<vault>/anthropic.toml` (chmod 0600); never leaves the server side
+- **MCP Servers** — wire up MCP servers besides satchel's own (GitHub MCP, filesystem MCP, anything that speaks JSON-RPC). Auth headers stored at `<vault>/mcp.toml`; browser traffic proxies through `/api/mcp/proxy/<id>`
 
 The UI ships dark + light themes that follow the design system tokens. Toggle with the button in the topbar; choice persists in `localStorage` and falls back to `prefers-color-scheme` on first load.
+
+## Public Tunnels (Cloudflare)
+
+The **Connect** tab has a "Public Tunnel" panel. Two modes:
+
+- **Quick** — anonymous, one-click. Generates a random `https://*.trycloudflare.com` URL pointing at your vault. No Cloudflare account needed; dies with the satchel process.
+- **Named** — paste a connector token + the public hostname you configured in [Cloudflare Zero Trust → Networks → Tunnels](https://one.dash.cloudflare.com/). Stable URL across restarts on a hostname you control.
+
+Release downloads bundle the per-platform `cloudflared` binary so it works out of the box. Source builds use whatever `cloudflared` is on `$PATH` (`brew install cloudflared` / `winget install Cloudflare.cloudflared` / `apt install cloudflared`).
+
+> ⚠️ A live tunnel exposes your vault on the public internet. Anyone with the URL can hit `/api/search` and `/mcp`. Stop the tunnel when you're done.
+
+## Collections
+
+Group ingested sources into named subsets (a "Work" collection, a "Research" collection, a "Personal" collection) and filter the Documents tab by collection. New in v1.6.0:
+
+- Documents-tab strip shows tabs for every collection + an `ALL` view.
+- Multi-select rows (header checkbox toggles all visible) and bulk **move to collection** / **remove from collection**.
+- Documents stay in the vault when a collection is deleted — only the membership goes.
+
+REST surface:
+- `GET /api/collections` — list with `document_count`
+- `POST /api/collections` — `{name}` to create
+- `DELETE /api/collections/:id` — drop the collection (cascades through `document_collections`; documents untouched)
+- `POST /api/collections/:id/sources` — `{source_paths: [...]}` to assign
+- `DELETE /api/collections/:id/sources` — same body, to unassign
+- `GET /api/sources?collection_id=N` — filter the existing sources index
+
+(Filtering MCP `search_knowledge` by collection is a v1.6.x follow-up — the schema and routes are ready; the chat-search side is unchanged for now.)
 
 ## Supported File Types
 

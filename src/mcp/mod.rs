@@ -242,7 +242,7 @@ fn handle_list_sources(args: &Value, db: &Database) -> Value {
     let limit = args["limit"].as_u64().unwrap_or(100).min(500) as usize;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
 
-    match db.list_sources(filter_type, filter_path, sort_by, limit, offset) {
+    match db.list_sources(filter_type, filter_path, sort_by, limit, offset, None) {
         Ok(page) if page.sources.is_empty() => {
             tool_text("No documents ingested yet. Use `satchel ingest <path>` to add files.")
         }

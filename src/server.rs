@@ -96,6 +96,12 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
             axum::routing::delete(api_mcp_servers_delete),
         )
         .route("/api/mcp/proxy/:id", post(api_mcp_proxy))
+        .route("/api/collections", get(api_collections_list).post(api_collections_create))
+        .route("/api/collections/:id", axum::routing::delete(api_collections_delete))
+        .route(
+            "/api/collections/:id/sources",
+            post(api_collection_assign).delete(api_collection_unassign),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -221,6 +227,8 @@ struct SourcesQuery {
     /// Page size (default 50, max 1000).
     limit: Option<usize>,
     offset: Option<usize>,
+    /// Restrict to source paths assigned to a single collection (v1.6.0+).
+    collection_id: Option<i64>,
 }
 
 async fn api_sources(
@@ -235,6 +243,7 @@ async fn api_sources(
         q.sort_by.as_deref().unwrap_or("name"),
         limit,
         offset,
+        q.collection_id,
     ) {
         Ok(page) => Json(json!({
             "sources": page.sources,
@@ -1032,4 +1041,72 @@ fn forward_streaming_response(upstream: reqwest::Response) -> Response {
     builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Collections — named subsets of documents inside a single vault. Schema
+// + Database methods live in src/rag/mod.rs; this section just exposes
+// them over REST.
+// ─────────────────────────────────────────────────────────────────────────
+
+async fn api_collections_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match state.db.list_collections() {
+        Ok(rows) => Json(json!({ "collections": rows })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateCollectionRequest {
+    name: String,
+}
+
+async fn api_collections_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateCollectionRequest>,
+) -> Json<Value> {
+    match state.db.create_collection(&req.name) {
+        Ok(id) => Json(json!({ "id": id, "name": req.name.trim() })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_collections_delete(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+) -> Json<Value> {
+    match state.db.delete_collection(id) {
+        Ok(true) => Json(json!({ "ok": true })),
+        Ok(false) => Json(json!({ "error": format!("no collection with id {id}") })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CollectionSourcesRequest {
+    /// Source paths to assign / unassign. We resolve these to all matching
+    /// document_ids server-side so the UI can stay in source-path land.
+    source_paths: Vec<String>,
+}
+
+async fn api_collection_assign(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<CollectionSourcesRequest>,
+) -> Json<Value> {
+    match state.db.collection_add_source_paths(id, &req.source_paths) {
+        Ok(n) => Json(json!({ "added": n })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_collection_unassign(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<CollectionSourcesRequest>,
+) -> Json<Value> {
+    match state.db.collection_remove_source_paths(id, &req.source_paths) {
+        Ok(n) => Json(json!({ "removed": n })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
 }

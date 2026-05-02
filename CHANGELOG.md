@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.6.0 — 2026-05-01
+
+### Collections — named subsets of your vault
+
+Sometimes you don't want to ask the totality. You want to ask "the
+research papers" or "the work notes" or "the cooking PDFs." Collections
+are named, opt-in groupings of documents that already live in the
+vault — no re-ingest, no second copy, just a named view.
+
+Schema (SQLite, additive — no migration required for existing vaults):
+
+- `collections (id, name UNIQUE, created_at)` — the named set
+- `document_collections (document_id, collection_id, PRIMARY KEY both)`
+  — many-to-many membership with `ON DELETE CASCADE` on both sides, so
+  deleting a document or a collection cleans up the join automatically
+
+Connections set `PRAGMA foreign_keys = ON` so the cascades actually
+fire (SQLite leaves them off by default).
+
+REST surface (server-side; the browser drives all of this through
+`web/src/lib/api.ts`):
+
+- `GET    /api/collections`                    → `[{id, name, created_at, document_count}]`
+- `POST   /api/collections           {name}`   → `{id, name}`
+- `DELETE /api/collections/:id`                → `{ok: true}`
+- `POST   /api/collections/:id/sources         {source_paths: [...]}`  → `{added}`
+- `DELETE /api/collections/:id/sources         {source_paths: [...]}`  → `{removed}`
+- `GET    /api/sources?collection_id=:id&...`  → existing browse, scoped to membership
+
+The browse endpoint takes `collection_id` alongside the existing
+`q` / `filter_type` / `sort_by` filters; they compose, so you can
+search inside a collection or sort it however you like.
+
+### Documents tab — multi-select and bulk move
+
+The Documents page got rebuilt around collections:
+
+- **Tab strip** at the top: ALL · Work · Personal · Research · …
+  with the count next to each tab name, an inline "+ new collection"
+  form, and a small × on each tab to delete that collection (the
+  documents stay; only the membership is removed).
+- **Multi-select rows**: every row gets a checkbox, the header has a
+  toggle-all, and a bulk-action bar appears in the summary line once
+  anything is selected — *Move to collection…* / *Remove from
+  collection…* / *Clear selection*.
+- **Move-to-collection modal** lets you pick the target collection
+  and choose add or remove. The list refreshes when it closes.
+
+### Tests
+
+- `test_collections_full_lifecycle` — exercises create, assign, list,
+  unassign, scope filtering, cascade-on-delete (146 tests passing).
+
+### Coming in v1.6.x
+
+- Filter `search_knowledge` (and the MCP surface) by collection so
+  Claude / WebLLM agents can be pointed at "just my work notes" the
+  same way the Documents tab is. The schema and REST already support
+  it; the chat agent loop just doesn't pass `collection_id` through
+  yet.
+
 ## v1.5.0 — 2026-05-01
 
 ### Chat: Anthropic Claude alongside the local WebLLM models

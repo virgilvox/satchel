@@ -48,6 +48,7 @@ export const api = {
     sort_by?: string;
     limit?: number;
     offset?: number;
+    collection_id?: number;
   }) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set('q', params.q);
@@ -55,6 +56,7 @@ export const api = {
     if (params.sort_by) qs.set('sort_by', params.sort_by);
     if (params.limit) qs.set('limit', String(params.limit));
     if (params.offset) qs.set('offset', String(params.offset));
+    if (params.collection_id != null) qs.set('collection_id', String(params.collection_id));
     return getJson<SourcesPage>('/api/sources?' + qs.toString());
   },
 
@@ -101,6 +103,22 @@ export const api = {
       body
     ),
 
+  collectionsList: () => getJson<{ collections: CollectionSummary[]; error?: string }>('/api/collections'),
+  collectionsCreate: (name: string) =>
+    postJson<{ id: number; name: string; error?: string }>('/api/collections', { name }),
+  collectionsDelete: (id: number) =>
+    deleteJson<{ ok?: boolean; error?: string }>('/api/collections/' + id, {}),
+  collectionAssign: (id: number, source_paths: string[]) =>
+    postJson<{ added: number; error?: string }>(
+      '/api/collections/' + id + '/sources',
+      { source_paths },
+    ),
+  collectionUnassign: (id: number, source_paths: string[]) =>
+    deleteJson<{ removed: number; error?: string }>(
+      '/api/collections/' + id + '/sources',
+      { source_paths },
+    ),
+
   tunnelStatus: () => getJson<TunnelState>('/api/tunnel'),
   tunnelStart:  (mode: TunnelMode = 'quick') =>
     postJson<TunnelState>('/api/tunnel/start', { mode }),
@@ -112,6 +130,13 @@ export const api = {
 };
 
 export type TunnelMode = 'quick' | 'named';
+
+export interface CollectionSummary {
+  id: number;
+  name: string;
+  created_at: string;
+  document_count: number;
+}
 
 export interface TunnelState {
   installed: boolean;

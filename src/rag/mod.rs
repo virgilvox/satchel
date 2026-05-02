@@ -104,6 +104,23 @@ const SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_docs_source ON documents(source_path);
     CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 
+    -- v1.6.0: collections — named subsets of documents inside a single
+    -- vault. Documents can belong to multiple collections (or none — they
+    -- still surface in unfiltered search). Cascading FK so deleting a
+    -- document removes its membership entries.
+    CREATE TABLE IF NOT EXISTS collections (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT NOT NULL UNIQUE,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS document_collections (
+        document_id   TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+        PRIMARY KEY (document_id, collection_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dc_collection ON document_collections(collection_id);
+
     CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
         text,
         content='chunks',
@@ -136,7 +153,9 @@ impl Database {
     #[cfg(feature = "test-support")]
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+        )?;
         conn.execute_batch(SCHEMA)?;
         conn.execute(
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('embedding_dims', '384')",
@@ -152,7 +171,9 @@ impl Database {
         std::fs::create_dir_all(vault_path)?;
         let db_path = vault_path.join("satchel.db");
         let conn = Connection::open(&db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+        )?;
         conn.execute_batch(SCHEMA)?;
         conn.execute(
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('embedding_dims', '384')",
@@ -398,6 +419,7 @@ impl Database {
         sort_by: &str,
         limit: usize,
         offset: usize,
+        filter_collection: Option<i64>,
     ) -> Result<SourcesPage> {
         let conn = self.conn.lock().unwrap();
         let path_like = filter_path
@@ -410,6 +432,15 @@ impl Database {
         }
         if path_like.is_some() {
             where_parts.push(r"d.source_path LIKE ? ESCAPE '\'");
+        }
+        if filter_collection.is_some() {
+            // Restrict to source_paths that have at least one document
+            // assigned to the collection. EXISTS keeps the cost flat as
+            // collection size grows.
+            where_parts.push(
+                "EXISTS (SELECT 1 FROM document_collections dc \
+                 WHERE dc.document_id = d.id AND dc.collection_id = ?)",
+            );
         }
         let where_clause = if where_parts.is_empty() {
             String::new()
@@ -436,6 +467,9 @@ impl Database {
         }
         if let Some(p) = &path_like {
             filter_params.push(p as &dyn rusqlite::ToSql);
+        }
+        if let Some(cid) = &filter_collection {
+            filter_params.push(cid as &dyn rusqlite::ToSql);
         }
         let total: i64 = conn.query_row(
             &total_sql,
@@ -701,6 +735,172 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Collections — named subsets of documents inside a single vault.
+    // Schema is in the SCHEMA constant above; foreign keys are enabled at
+    // open() so the ON DELETE CASCADE entries clean up after themselves.
+    // ─────────────────────────────────────────────────────────────────────
+
+    pub fn list_collections(&self) -> Result<Vec<CollectionInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.name, c.created_at,
+                    (SELECT COUNT(*) FROM document_collections dc WHERE dc.collection_id = c.id)
+             FROM collections c
+             ORDER BY c.name COLLATE NOCASE",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CollectionInfo {
+                    id: r.get::<_, i64>(0)?,
+                    name: r.get::<_, String>(1)?,
+                    created_at: r.get::<_, String>(2)?,
+                    document_count: r.get::<_, i64>(3)? as usize,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Create a new collection and return its id. Names are unique
+    /// (case-sensitive at the SQL level; we trim whitespace).
+    pub fn create_collection(&self, name: &str) -> Result<i64> {
+        let n = name.trim();
+        if n.is_empty() {
+            anyhow::bail!("collection name must not be empty");
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO collections (name) VALUES (?1)", params![n])?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn delete_collection(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
+    /// Add documents (by id) to a collection. Idempotent — duplicates are
+    /// collapsed by the composite primary key.
+    pub fn collection_add_documents(&self, id: i64, document_ids: &[String]) -> Result<usize> {
+        if document_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO document_collections (document_id, collection_id) VALUES (?1, ?2)",
+            )?;
+            for doc_id in document_ids {
+                stmt.execute(params![doc_id, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(document_ids.len())
+    }
+
+    pub fn collection_remove_documents(&self, id: i64, document_ids: &[String]) -> Result<usize> {
+        if document_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "DELETE FROM document_collections WHERE collection_id = ?1 AND document_id = ?2",
+            )?;
+            for doc_id in document_ids {
+                removed += stmt.execute(params![id, doc_id])? as usize;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Add every document at the given source_paths to a collection.
+    /// Convenience for the Documents-tab bulk-move UI.
+    pub fn collection_add_source_paths(
+        &self,
+        id: i64,
+        source_paths: &[String],
+    ) -> Result<usize> {
+        if source_paths.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; source_paths.len()].join(",");
+        let conn = self.conn.lock().unwrap();
+        let sql =
+            format!("SELECT id FROM documents WHERE source_path IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        let p: Vec<&dyn rusqlite::ToSql> = source_paths
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+        let ids: Vec<String> = stmt
+            .query_map(p.as_slice(), |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        drop(conn);
+        self.collection_add_documents(id, &ids)
+    }
+
+    pub fn collection_remove_source_paths(
+        &self,
+        id: i64,
+        source_paths: &[String],
+    ) -> Result<usize> {
+        if source_paths.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; source_paths.len()].join(",");
+        let conn = self.conn.lock().unwrap();
+        let sql =
+            format!("SELECT id FROM documents WHERE source_path IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        let p: Vec<&dyn rusqlite::ToSql> = source_paths
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+        let ids: Vec<String> = stmt
+            .query_map(p.as_slice(), |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        drop(conn);
+        self.collection_remove_documents(id, &ids)
+    }
+
+    /// List the source_paths assigned to a collection (one row per
+    /// distinct source_path; collections membership is per-document but
+    /// the UI groups by source_path everywhere else, so we mirror that).
+    pub fn collection_source_paths(&self, id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT d.source_path
+             FROM documents d
+             JOIN document_collections dc ON dc.document_id = d.id
+             WHERE dc.collection_id = ?1
+             ORDER BY d.source_path",
+        )?;
+        let rows = stmt
+            .query_map(params![id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CollectionInfo {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+    pub document_count: usize,
 }
 
 pub fn print_stats(db: &Database) -> Result<()> {
@@ -1022,6 +1222,62 @@ mod tests {
     }
 
     #[test]
+    fn test_collections_full_lifecycle() {
+        let db = Database::open_memory().unwrap();
+        // Empty
+        assert!(db.list_collections().unwrap().is_empty());
+        // Create two
+        let work = db.create_collection("Work").unwrap();
+        let personal = db.create_collection("Personal").unwrap();
+        // Empty name rejected
+        assert!(db.create_collection("   ").is_err());
+        // Duplicate name rejected (UNIQUE)
+        assert!(db.create_collection("Work").is_err());
+
+        // Seed two source paths
+        db.insert_document("d1", "/work/a.md", "md", None, "x", "h").unwrap();
+        db.insert_document("d2", "/work/b.md", "md", None, "y", "h").unwrap();
+        db.insert_document("d3", "/personal/diary.md", "md", None, "z", "h").unwrap();
+
+        // Assign by source path
+        db.collection_add_source_paths(work, &["/work/a.md".into(), "/work/b.md".into()])
+            .unwrap();
+        db.collection_add_source_paths(personal, &["/personal/diary.md".into()])
+            .unwrap();
+
+        // collection_source_paths reflects the assignments
+        let work_paths = db.collection_source_paths(work).unwrap();
+        assert_eq!(work_paths, vec!["/work/a.md", "/work/b.md"]);
+
+        // list_collections has document_counts (one per document, not source)
+        let cols = db.list_collections().unwrap();
+        let work_info = cols.iter().find(|c| c.id == work).unwrap();
+        assert_eq!(work_info.document_count, 2);
+        let personal_info = cols.iter().find(|c| c.id == personal).unwrap();
+        assert_eq!(personal_info.document_count, 1);
+
+        // list_sources collection filter narrows the result
+        let work_sources = db.list_sources(None, None, "name", 100, 0, Some(work)).unwrap();
+        assert_eq!(work_sources.total, 2);
+        let personal_sources = db.list_sources(None, None, "name", 100, 0, Some(personal)).unwrap();
+        assert_eq!(personal_sources.total, 1);
+        let all_sources = db.list_sources(None, None, "name", 100, 0, None).unwrap();
+        assert_eq!(all_sources.total, 3);
+
+        // Unassign + delete
+        db.collection_remove_source_paths(work, &["/work/a.md".into()]).unwrap();
+        let after = db.collection_source_paths(work).unwrap();
+        assert_eq!(after, vec!["/work/b.md"]);
+
+        // Delete cascades through document_collections
+        assert!(db.delete_collection(personal).unwrap());
+        let cols = db.list_collections().unwrap();
+        assert_eq!(cols.len(), 1);
+        // and a re-delete returns false (idempotent)
+        assert!(!db.delete_collection(personal).unwrap());
+    }
+
+    #[test]
     fn test_database_list_sources() {
         let (db, dir) = temp_db();
 
@@ -1030,11 +1286,11 @@ mod tests {
         db.insert_document("d2", "/b.txt", "txt", None, "b", "h2")
             .unwrap();
 
-        let all = db.list_sources(None, None, "name", 100, 0).unwrap();
+        let all = db.list_sources(None, None, "name", 100, 0, None).unwrap();
         assert_eq!(all.sources.len(), 2);
         assert_eq!(all.total, 2);
 
-        let md_only = db.list_sources(Some("md"), None, "name", 100, 0).unwrap();
+        let md_only = db.list_sources(Some("md"), None, "name", 100, 0, None).unwrap();
         assert_eq!(md_only.sources.len(), 1);
         assert_eq!(md_only.sources[0].file_type, "md");
 
@@ -1157,7 +1413,7 @@ mod tests {
             .unwrap();
         db.insert_document("d2", "/new.md", "md", None, "b", "h2")
             .unwrap();
-        let sources = db.list_sources(None, None, "date", 100, 0).unwrap();
+        let sources = db.list_sources(None, None, "date", 100, 0, None).unwrap();
         assert_eq!(sources.sources.len(), 2);
     }
 
@@ -1417,7 +1673,7 @@ mod tests {
 
         let (d, _) = db.delete_by_path_prefix("/notes_2024", false).unwrap();
         assert_eq!(d, 1, "underscore must match literally, not as wildcard");
-        let remaining = db.list_sources(None, None, "name", 100, 0).unwrap();
+        let remaining = db.list_sources(None, None, "name", 100, 0, None).unwrap();
         assert_eq!(remaining.sources.len(), 1);
         assert!(remaining.sources[0].path.contains("notesX2024"));
     }
@@ -1432,7 +1688,7 @@ mod tests {
 
         let (d, _) = db.delete_by_path_exact("/foo_bar.md", false).unwrap();
         assert_eq!(d, 1);
-        let remaining = db.list_sources(None, None, "name", 100, 0).unwrap();
+        let remaining = db.list_sources(None, None, "name", 100, 0, None).unwrap();
         assert_eq!(remaining.sources.len(), 1);
         assert!(remaining.sources[0].path.contains("fooXbar"));
     }
@@ -1548,7 +1804,7 @@ mod tests {
         db.insert_chunk("c2", "d2", 1, "y", 5, 1, 2, &[0.2])
             .unwrap();
 
-        let sources = db.list_sources(None, None, "chunks", 100, 0).unwrap();
+        let sources = db.list_sources(None, None, "chunks", 100, 0, None).unwrap();
         assert_eq!(sources.sources[0].path, "/many.md");
     }
 
@@ -1648,7 +1904,7 @@ mod tests {
             db.insert_chunk(&format!("c{i}"), &id, 0, "msg", 1, 0, 3, &[1.0, 0.0])
                 .unwrap();
         }
-        let page = db.list_sources(None, None, "name", 100, 0).unwrap();
+        let page = db.list_sources(None, None, "name", 100, 0, None).unwrap();
         assert_eq!(page.sources.len(), 1, "should group 50 docs into 1 row");
         assert_eq!(page.sources[0].record_count, 50);
         assert_eq!(page.sources[0].chunk_count, 50);
@@ -1669,22 +1925,22 @@ mod tests {
                 .unwrap();
         }
 
-        let p1 = db.list_sources(None, None, "name", 10, 0).unwrap();
+        let p1 = db.list_sources(None, None, "name", 10, 0, None).unwrap();
         assert_eq!(p1.sources.len(), 10);
         assert_eq!(p1.total, 30);
 
-        let p2 = db.list_sources(None, None, "name", 10, 10).unwrap();
+        let p2 = db.list_sources(None, None, "name", 10, 10, None).unwrap();
         assert_eq!(p2.sources.len(), 10);
 
         let notes = db
-            .list_sources(None, Some("/notes/"), "name", 100, 0)
+            .list_sources(None, Some("/notes/"), "name", 100, 0, None)
             .unwrap();
         assert_eq!(notes.total, 10);
         assert_eq!(notes.sources.len(), 10);
 
         // Underscore in filter must match literally.
         let underscored = db
-            .list_sources(None, Some("/work/_"), "name", 100, 0)
+            .list_sources(None, Some("/work/_"), "name", 100, 0, None)
             .unwrap();
         assert_eq!(
             underscored.total, 0,
