@@ -59,6 +59,24 @@ export interface SourcesPage {
   error?: string;
 }
 
+export interface DocumentRow {
+  id: string;
+  source_path: string;
+  title: string | null;
+  file_type: string;
+  chunk_count: number;
+  ingested_at: string;
+  collection_ids: number[];
+}
+
+export interface DocumentsPage {
+  documents: DocumentRow[];
+  total: number;
+  offset: number;
+  limit: number;
+  error?: string;
+}
+
 export interface FileTypeStat {
   file_type: string;
   source_count: number;

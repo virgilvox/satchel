@@ -180,12 +180,20 @@ export async function createEngine(
   const webllm = await loadLib();
   // WebLLM's third-arg `chatOpts` accepts `context_window_size` and
   // `sliding_window_size` (snake_case in the underlying TS types).
-  // Only forward keys the user explicitly set so we don't override
-  // model defaults unintentionally.
-  const llmChatOpts: Record<string, number> = {};
-  if (chatOpts?.contextWindowSize) llmChatOpts.context_window_size = chatOpts.contextWindowSize;
-  if (chatOpts?.slidingWindowSize) llmChatOpts.sliding_window_size = chatOpts.slidingWindowSize;
-  const opts = Object.keys(llmChatOpts).length ? llmChatOpts : undefined;
+  // Only ONE of them can be positive — the other must be -1 (or omitted)
+  // or WebLLM rejects with "Only one of context_window_size and
+  // sliding_window_size can be positive." Pass through the user's chosen
+  // override and explicitly set the opposite to -1 so a stale model-card
+  // default can't reintroduce the collision.
+  const ctx = chatOpts?.contextWindowSize;
+  const sliding = chatOpts?.slidingWindowSize;
+  let llmChatOpts: Record<string, number> | undefined;
+  if (ctx && ctx > 0) {
+    llmChatOpts = { context_window_size: ctx, sliding_window_size: -1 };
+  } else if (sliding && sliding > 0) {
+    llmChatOpts = { context_window_size: -1, sliding_window_size: sliding };
+  }
+  const opts = llmChatOpts;
 
   const engine = await webllm.CreateMLCEngine(
     modelId,

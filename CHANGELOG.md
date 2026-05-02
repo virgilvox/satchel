@@ -1,5 +1,75 @@
 # Changelog
 
+## v2.1.0 — 2026-05-02
+
+### Documents tab — BY RECORD view
+
+The Documents tab grouped by `source_path` so an archive ingest of, say,
+50,000 Slack messages collapsed into ~365 rows (one per daily JSON
+file) — and you couldn't see or pick the individual messages from the
+UI. The records were *in* the vault; the table was just summarizing
+above them.
+
+A new BY RECORD / BY SOURCE toggle sits at the right of the filter
+row. BY RECORD (the new default) shows one row per `documents` row —
+the actual ingested unit (each Slack message, each PDF, each
+conversation) — with title, source path, chunk count, ingested time,
+and the collections each record currently belongs to. BY SOURCE keeps
+the v1.6 path-grouped summary for archive-heavy vaults.
+
+Multi-select and bulk *move to collection* / *remove from collection*
+work in both modes. BY RECORD assigns at the document level via two
+new endpoints:
+
+- `POST   /api/collections/:id/documents { document_ids: [...] }` → `{added}`
+- `DELETE /api/collections/:id/documents { document_ids: [...] }` → `{removed}`
+
+BY SOURCE keeps using the existing source-paths endpoints. Collection
+membership is honest about which axis you're picking on.
+
+The path-substring filter in BY RECORD also matches against `title`
+so you can find a specific Slack message or conversation by name.
+
+### `GET /api/documents`
+
+New REST endpoint backing BY RECORD. Same query shape as `/api/sources`
+(`q`, `filter_type`, `sort_by`, `limit`, `offset`, `collection_id`)
+but returns `{documents: DocumentRow[], total, ...}` where each
+`DocumentRow` is `{id, source_path, title?, file_type, chunk_count,
+ingested_at, collection_ids: [...]}`. The `collection_ids` field is
+populated server-side so the UI doesn't need a second round-trip per
+row.
+
+### WebLLM context/sliding-window load fix
+
+Picking both `context_window_size` and `sliding_window_size` in the
+chat Settings modal made WebLLM refuse to load the engine —
+
+> LOAD FAILED · Only one of context_window_size and sliding_window_size
+> can be positive. Got: context_window_size: 8192, sliding_window_size:
+> 8192. Consider modifying ModelRecord.overrides to set one of them to -1.
+
+Three-part fix:
+
+1. `createEngine` now sends one positive override and explicitly sets
+   the opposite to `-1`, overriding any default the model card might
+   carry. Mutually exclusive at the boundary so a stale config can't
+   reproduce the collision.
+2. The Settings modal makes the choice explicit: picking a context
+   strategy resets the other to its sentinel (`auto` / `off`). A short
+   description above the two pickers explains the trade-off.
+3. The "context full" runtime hint now leads with `sliding_window_size`
+   as the most reliable answer (keeps the most recent N tokens, drops
+   older — works regardless of the model's compile-time max). Calling
+   out the v2.1+ mutual-exclusivity behavior so the message stays
+   accurate as the user opens Settings.
+
+### Tests
+
+148 lib tests passing (added `test_list_documents_ungrouped` covering
+the per-record list, title-match filter, collection-id surfacing on
+each row, and collection-scoped totals).
+
 ## v2.0.0 — 2026-05-01
 
 A second stability declaration. v1.0 declared the retrieval surface

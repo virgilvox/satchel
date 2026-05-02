@@ -60,6 +60,7 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
         .route("/mcp", post(mcp_handler))
         .route("/api/status", get(api_status))
         .route("/api/sources", get(api_sources).delete(api_delete_sources))
+        .route("/api/documents", get(api_documents))
         .route("/api/search", post(api_search))
         .route("/api/document", get(api_document))
         .route("/api/tags", get(api_tags))
@@ -107,6 +108,10 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
         .route(
             "/api/collections/:id/sources",
             post(api_collection_assign).delete(api_collection_unassign),
+        )
+        .route(
+            "/api/collections/:id/documents",
+            post(api_collection_assign_docs).delete(api_collection_unassign_docs),
         )
         .layer(
             CorsLayer::new()
@@ -253,6 +258,30 @@ async fn api_sources(
     ) {
         Ok(page) => Json(json!({
             "sources": page.sources,
+            "total": page.total,
+            "offset": page.offset,
+            "limit": page.limit,
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_documents(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SourcesQuery>,
+) -> Json<Value> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
+    let offset = q.offset.unwrap_or(0);
+    match state.db.list_documents(
+        q.filter_type.as_deref(),
+        q.q.as_deref(),
+        q.sort_by.as_deref().unwrap_or("name"),
+        limit,
+        offset,
+        q.collection_id,
+    ) {
+        Ok(page) => Json(json!({
+            "documents": page.documents,
             "total": page.total,
             "offset": page.offset,
             "limit": page.limit,
@@ -1128,6 +1157,36 @@ async fn api_collection_unassign(
         .db
         .collection_remove_source_paths(id, &req.source_paths)
     {
+        Ok(n) => Json(json!({ "removed": n })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct CollectionDocumentsRequest {
+    /// Document ids (from `documents.id`) to assign / unassign. Use this
+    /// when the UI is in BY RECORD mode — picking individual ingested rows
+    /// rather than every record at a source_path.
+    document_ids: Vec<String>,
+}
+
+async fn api_collection_assign_docs(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<CollectionDocumentsRequest>,
+) -> Json<Value> {
+    match state.db.collection_add_documents(id, &req.document_ids) {
+        Ok(n) => Json(json!({ "added": n })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_collection_unassign_docs(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<CollectionDocumentsRequest>,
+) -> Json<Value> {
+    match state.db.collection_remove_documents(id, &req.document_ids) {
         Ok(n) => Json(json!({ "removed": n })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }

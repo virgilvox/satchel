@@ -361,8 +361,14 @@
                   role: 'error' as const,
                   streaming: false,
                   content:
-                    'Context full — the conversation grew past the model\'s window.\n\nFix one of: (1) open ⚙ Settings → Context, bump context_window_size to 8192, then UNLOAD + LOAD; (2) enable sliding_window_size to keep the most recent N tokens; (3) Clear chat to start fresh.\n\nRaw: ' +
-                    msg,
+                    'Context full — the conversation outgrew the model\'s window.\n\n' +
+                    'Most reliable fix: Settings → Context → set sliding_window_size (e.g. 4096 or 8192). ' +
+                    'It keeps the most recent N tokens in attention and drops older ones, which works regardless of the model\'s compile-time max. ' +
+                    'UNLOAD + LOAD to apply.\n\n' +
+                    'Alternatives: (1) bump context_window_size if the model was compiled with a larger window (most small models top out at 4096–8192); ' +
+                    '(2) Clear chat to start fresh.\n\n' +
+                    'Note: context_window_size and sliding_window_size are mutually exclusive — picking one in Settings clears the other automatically (v2.1+).\n\n' +
+                    'Raw: ' + msg,
                 },
           );
           return;
@@ -800,7 +806,7 @@
   <div class="ctx-banner">
     <strong>Context full.</strong>
     Open <button class="link" type="button" onclick={() => (settingsOpen = true)}>⚙ Settings → Context</button>
-    and bump <code>context_window_size</code> to 8192 (then UNLOAD + LOAD), or
+    and pick <code>sliding_window_size</code> (the most reliable fix — keeps the recent N tokens, drops older), then UNLOAD + LOAD, or
     <button class="link" type="button" onclick={clearChat}>clear chat</button>
     to start fresh.
   </div>

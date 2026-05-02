@@ -4,6 +4,7 @@
 
 import type {
   BrowseResponse,
+  DocumentsPage,
   FileTypeStat,
   IngestJob,
   SearchPage,
@@ -36,6 +37,26 @@ async function deleteJson<T>(url: string, body: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+// `/api/sources` and `/api/documents` accept the same query shape;
+// this keeps both call-sites from drifting.
+function buildSourcesQS(params: {
+  q?: string;
+  filter_type?: string;
+  sort_by?: string;
+  limit?: number;
+  offset?: number;
+  collection_id?: number;
+}): string {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set('q', params.q);
+  if (params.filter_type) qs.set('filter_type', params.filter_type);
+  if (params.sort_by) qs.set('sort_by', params.sort_by);
+  if (params.limit) qs.set('limit', String(params.limit));
+  if (params.offset) qs.set('offset', String(params.offset));
+  if (params.collection_id != null) qs.set('collection_id', String(params.collection_id));
+  return qs.toString();
+}
+
 export const api = {
   status: () => getJson<StatusResponse>('/api/status'),
 
@@ -55,14 +76,22 @@ export const api = {
     offset?: number;
     collection_id?: number;
   }) => {
-    const qs = new URLSearchParams();
-    if (params.q) qs.set('q', params.q);
-    if (params.filter_type) qs.set('filter_type', params.filter_type);
-    if (params.sort_by) qs.set('sort_by', params.sort_by);
-    if (params.limit) qs.set('limit', String(params.limit));
-    if (params.offset) qs.set('offset', String(params.offset));
-    if (params.collection_id != null) qs.set('collection_id', String(params.collection_id));
-    return getJson<SourcesPage>('/api/sources?' + qs.toString());
+    const qs = buildSourcesQS(params);
+    return getJson<SourcesPage>('/api/sources?' + qs);
+  },
+
+  // Same query shape as `sources` but returns one row per `documents` row
+  // (each ingested record). Backs the Documents-tab BY RECORD mode.
+  documents: (params: {
+    q?: string;
+    filter_type?: string;
+    sort_by?: string;
+    limit?: number;
+    offset?: number;
+    collection_id?: number;
+  }) => {
+    const qs = buildSourcesQS(params);
+    return getJson<DocumentsPage>('/api/documents?' + qs);
   },
 
   types: () => getJson<{ types: FileTypeStat[]; error?: string }>('/api/types'),
@@ -126,6 +155,18 @@ export const api = {
     deleteJson<{ removed: number; error?: string }>(
       '/api/collections/' + id + '/sources',
       { source_paths },
+    ),
+  // Per-record (document_id) assignment for the BY RECORD view, where the
+  // user picked individual rows out of an archive rather than the whole path.
+  collectionAssignDocs: (id: number, document_ids: string[]) =>
+    postJson<{ added: number; error?: string }>(
+      '/api/collections/' + id + '/documents',
+      { document_ids },
+    ),
+  collectionUnassignDocs: (id: number, document_ids: string[]) =>
+    deleteJson<{ removed: number; error?: string }>(
+      '/api/collections/' + id + '/documents',
+      { document_ids },
     ),
 
   tunnelStatus: () => getJson<TunnelState>('/api/tunnel'),

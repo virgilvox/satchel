@@ -47,6 +47,32 @@ pub struct SourcesPage {
     pub limit: usize,
 }
 
+/// One row in the documents table — a single ingested record. Archive
+/// imports (Slack, mbox, ChatGPT) produce one of these per message /
+/// conversation / email; single-file imports produce one per file.
+/// This is the ungrouped view that backs the Documents-tab "BY RECORD"
+/// mode where users can pick individual records into collections.
+#[derive(Debug, serde::Serialize)]
+pub struct DocumentRow {
+    pub id: String,
+    pub source_path: String,
+    pub title: Option<String>,
+    pub file_type: String,
+    pub chunk_count: usize,
+    pub ingested_at: String,
+    /// Collection ids this document is currently in. Empty for unassigned.
+    /// Lets the UI render "in: Work, Research" badges without a second call.
+    pub collection_ids: Vec<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DocumentsPage {
+    pub documents: Vec<DocumentRow>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 /// One record at a given source_path, suitable for "show conversation context"
 /// rendering. Records are returned in ingest order — for archive sources whose
 /// handlers walk messages chronologically (Slack, Discord, mbox), this yields
@@ -542,6 +568,132 @@ impl Database {
 
         Ok(SourcesPage {
             sources,
+            total: total as usize,
+            offset,
+            limit,
+        })
+    }
+
+    /// List individual `documents` rows — every ingested record, ungrouped.
+    /// Use this when the user needs to see (or pick) records one-by-one
+    /// rather than the path-level summary `list_sources` returns. Same
+    /// filter contract as `list_sources`: `filter_type` (file_type), a
+    /// substring `filter_path` against source_path, an optional collection
+    /// scope, and `sort_by` keyed on name / date / chunks. Pagination
+    /// applies to the documents table directly; `total` is the un-paged
+    /// count after filters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_documents(
+        &self,
+        filter_type: Option<&str>,
+        filter_path: Option<&str>,
+        sort_by: &str,
+        limit: usize,
+        offset: usize,
+        filter_collection: Option<i64>,
+    ) -> Result<DocumentsPage> {
+        let conn = self.conn.lock().unwrap();
+        let path_like = filter_path
+            .filter(|s| !s.is_empty())
+            .map(|q| format!("%{}%", escape_like(q)));
+
+        let mut where_parts: Vec<&'static str> = Vec::new();
+        if filter_type.is_some() {
+            where_parts.push("d.file_type = ?");
+        }
+        if path_like.is_some() {
+            where_parts.push(r"(d.source_path LIKE ? ESCAPE '\' OR d.title LIKE ? ESCAPE '\')");
+        }
+        if filter_collection.is_some() {
+            where_parts.push(
+                "EXISTS (SELECT 1 FROM document_collections dc \
+                 WHERE dc.document_id = d.id AND dc.collection_id = ?)",
+            );
+        }
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_parts.join(" AND "))
+        };
+        let order = match sort_by {
+            "date" => "d.ingested_at DESC",
+            "chunks" => "chunk_count DESC",
+            // No "records" for the per-doc view; fall through to name/path.
+            _ => "d.source_path ASC, d.id ASC",
+        };
+
+        let ft_owned: Option<String> = filter_type.map(String::from);
+        let mut filter_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        if let Some(ft) = &ft_owned {
+            filter_params.push(ft as &dyn rusqlite::ToSql);
+        }
+        if let Some(p) = &path_like {
+            // Two ?'s for the path/title pair.
+            filter_params.push(p as &dyn rusqlite::ToSql);
+            filter_params.push(p as &dyn rusqlite::ToSql);
+        }
+        if let Some(cid) = &filter_collection {
+            filter_params.push(cid as &dyn rusqlite::ToSql);
+        }
+
+        let total_sql = format!("SELECT COUNT(*) FROM documents d {where_clause}");
+        let total: i64 = conn.query_row(
+            &total_sql,
+            rusqlite::params_from_iter(filter_params.iter().copied()),
+            |r| r.get(0),
+        )?;
+
+        let page_sql = format!(
+            "SELECT
+                d.id,
+                d.source_path,
+                d.title,
+                d.file_type,
+                d.ingested_at,
+                (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) AS chunk_count,
+                COALESCE(
+                    (SELECT GROUP_CONCAT(dc.collection_id)
+                     FROM document_collections dc WHERE dc.document_id = d.id),
+                    ''
+                ) AS collection_ids_csv
+             FROM documents d
+             {where_clause}
+             ORDER BY {order}
+             LIMIT ? OFFSET ?"
+        );
+        let limit_sql = limit as i64;
+        let offset_sql = offset as i64;
+        let mut all_params = filter_params.clone();
+        all_params.push(&limit_sql);
+        all_params.push(&offset_sql);
+
+        let mut stmt = conn.prepare(&page_sql)?;
+        let documents: Vec<DocumentRow> = stmt
+            .query_map(
+                rusqlite::params_from_iter(all_params.iter().copied()),
+                |row| {
+                    let csv: String = row.get(6)?;
+                    let collection_ids: Vec<i64> = csv
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    Ok(DocumentRow {
+                        id: row.get(0)?,
+                        source_path: row.get(1)?,
+                        title: row.get(2)?,
+                        file_type: row.get(3)?,
+                        ingested_at: row.get(4)?,
+                        chunk_count: row.get::<_, i64>(5)? as usize,
+                        collection_ids,
+                    })
+                },
+            )?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(DocumentsPage {
+            documents,
             total: total as usize,
             offset,
             limit,
@@ -1328,6 +1480,72 @@ mod tests {
         assert_eq!(md_only.sources[0].file_type, "md");
 
         cleanup(&dir);
+    }
+
+    #[test]
+    fn test_list_documents_ungrouped() {
+        // Same source_path, three records — `list_sources` returns one row,
+        // `list_documents` returns three. Backs the Documents-tab BY RECORD
+        // mode where users pick individual ingested records into collections.
+        let db = Database::open_memory().unwrap();
+        db.insert_document(
+            "m1",
+            "/slack/general.json",
+            "slack",
+            Some("msg-1"),
+            "a",
+            "h1",
+        )
+        .unwrap();
+        db.insert_document(
+            "m2",
+            "/slack/general.json",
+            "slack",
+            Some("msg-2"),
+            "b",
+            "h2",
+        )
+        .unwrap();
+        db.insert_document(
+            "m3",
+            "/slack/general.json",
+            "slack",
+            Some("msg-3"),
+            "c",
+            "h3",
+        )
+        .unwrap();
+
+        let grouped = db.list_sources(None, None, "name", 100, 0, None).unwrap();
+        assert_eq!(grouped.total, 1, "list_sources groups by source_path");
+        assert_eq!(grouped.sources[0].record_count, 3);
+
+        let flat = db.list_documents(None, None, "name", 100, 0, None).unwrap();
+        assert_eq!(flat.total, 3, "list_documents shows every record");
+        assert_eq!(flat.documents.len(), 3);
+
+        // Path filter also matches title.
+        let by_title = db
+            .list_documents(None, Some("msg-2"), "name", 100, 0, None)
+            .unwrap();
+        assert_eq!(by_title.total, 1);
+        assert_eq!(by_title.documents[0].id, "m2");
+
+        // Per-record collection assignment surfaces in the row's collection_ids.
+        let work = db.create_collection("Work").unwrap();
+        db.collection_add_documents(work, &["m1".into(), "m3".into()])
+            .unwrap();
+        let after = db.list_documents(None, None, "name", 100, 0, None).unwrap();
+        let m1 = after.documents.iter().find(|d| d.id == "m1").unwrap();
+        let m2 = after.documents.iter().find(|d| d.id == "m2").unwrap();
+        assert_eq!(m1.collection_ids, vec![work]);
+        assert!(m2.collection_ids.is_empty());
+
+        // Collection scope filters at the document level.
+        let scoped = db
+            .list_documents(None, None, "name", 100, 0, Some(work))
+            .unwrap();
+        assert_eq!(scoped.total, 2);
     }
 
     #[test]

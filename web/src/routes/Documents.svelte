@@ -2,25 +2,42 @@
   import { onMount } from 'svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import { api, type CollectionSummary } from '../lib/api';
-  import type { FileTypeStat, SourceRow } from '../lib/types';
+  import type { DocumentRow, FileTypeStat, SourceRow } from '../lib/types';
+
+  // ─── view mode ───
+  // BY RECORD shows every `documents` row — what the user thinks of as
+  // "ingested data" (each Slack message, each PDF, each conversation).
+  // BY SOURCE groups by source_path so an archive collapses into one row
+  // per file. The default is RECORD because that's the question users
+  // actually want answered ("what's in my vault, and how do I move
+  // pieces of it into a collection").
+  type ViewMode = 'record' | 'source';
+  let viewMode = $state<ViewMode>('record');
 
   let q = $state('');
   let type = $state('');
   let sort = $state('name');
   let collectionId: number | '' = $state('');
   let sources = $state<SourceRow[]>([]);
+  let documents = $state<DocumentRow[]>([]);
   let total = $state(0);
-  // Whole-vault count, independent of collection / search filters. The ALL
-  // tab displays this so it stays accurate when the user is filtered into a
-  // collection. Refreshed alongside the filtered list.
-  let vaultTotal = $state(0);
+  // Whole-vault count, independent of collection / search filters. Each
+  // mode tracks its own — sources counts source_paths, records counts
+  // documents — so the ALL-tab number is honest about which axis you're
+  // looking at.
+  let vaultTotalSources = $state(0);
+  let vaultTotalRecords = $state(0);
   let loading = $state(true);
   let types = $state<FileTypeStat[]>([]);
   let collections = $state<CollectionSummary[]>([]);
   let debounce: number | undefined;
 
-  // ─── multi-select for bulk move-to-collection ───
-  let selected = $state<Set<string>>(new Set());
+  // ─── multi-select ───
+  // Source mode keys selection by source_path; record mode by document.id.
+  // They're disjoint sets so switching modes doesn't lose context within
+  // a mode but bulk-move always operates on the active mode's selection.
+  let selectedSources = $state<Set<string>>(new Set());
+  let selectedDocs = $state<Set<string>>(new Set());
   let collectionDialogOpen = $state(false);
   let collectionDialogMode: 'add' | 'remove' = $state('add');
   let bulkBusy = $state(false);
@@ -33,27 +50,46 @@
 
   const PAGE = 50;
 
+  function commonParams(offset: number) {
+    return {
+      q,
+      filter_type: type,
+      sort_by: sort,
+      limit: PAGE,
+      offset,
+      ...(collectionId !== '' ? { collection_id: collectionId as number } : {}),
+    };
+  }
+
   async function load() {
     loading = true;
     try {
-      const r = await api.sources({
-        q,
-        filter_type: type,
-        sort_by: sort,
-        limit: PAGE,
-        offset: 0,
-        ...(collectionId !== '' ? { collection_id: collectionId as number } : {}),
-      });
-      sources = r.sources ?? [];
-      total = r.total ?? 0;
-      // If we're already viewing the unfiltered vault, the same response gives
-      // us the vault total for free. Otherwise refresh it separately so the
-      // ALL tab's count is right even while the user is scoped to a collection.
-      if (collectionId === '' && !q && !type) {
-        vaultTotal = total;
+      if (viewMode === 'source') {
+        const r = await api.sources(commonParams(0));
+        sources = r.sources ?? [];
+        total = r.total ?? 0;
       } else {
-        const u = await api.sources({ limit: 1, offset: 0 });
-        vaultTotal = u.total ?? vaultTotal;
+        const r = await api.documents(commonParams(0));
+        documents = r.documents ?? [];
+        total = r.total ?? 0;
+      }
+      // Refresh the unfiltered vault totals so the ALL tab is honest about
+      // what's in the vault regardless of what the user is currently
+      // scoped to. One extra cheap call per mode when filters are active.
+      const filterActive = collectionId !== '' || q || type;
+      if (!filterActive) {
+        if (viewMode === 'source') vaultTotalSources = total;
+        else vaultTotalRecords = total;
+      } else {
+        // Only fetch the mode that's currently visible; the other refreshes
+        // when the user toggles into it.
+        if (viewMode === 'source') {
+          const u = await api.sources({ limit: 1, offset: 0 });
+          vaultTotalSources = u.total ?? vaultTotalSources;
+        } else {
+          const u = await api.documents({ limit: 1, offset: 0 });
+          vaultTotalRecords = u.total ?? vaultTotalRecords;
+        }
       }
     } finally {
       loading = false;
@@ -61,16 +97,15 @@
   }
 
   async function loadMore() {
-    const r = await api.sources({
-      q,
-      filter_type: type,
-      sort_by: sort,
-      limit: PAGE,
-      offset: sources.length,
-      ...(collectionId !== '' ? { collection_id: collectionId as number } : {}),
-    });
-    sources = [...sources, ...(r.sources ?? [])];
-    total = r.total ?? total;
+    if (viewMode === 'source') {
+      const r = await api.sources(commonParams(sources.length));
+      sources = [...sources, ...(r.sources ?? [])];
+      total = r.total ?? total;
+    } else {
+      const r = await api.documents(commonParams(documents.length));
+      documents = [...documents, ...(r.documents ?? [])];
+      total = r.total ?? total;
+    }
   }
 
   async function loadTypes() {
@@ -89,43 +124,75 @@
     debounce = window.setTimeout(load, 250);
   }
 
+  function setMode(m: ViewMode) {
+    if (m === viewMode) return;
+    viewMode = m;
+    // Selection axes are different — clear so the user doesn't carry a
+    // stale path-set into a record-set view (and vice versa).
+    selectedSources = new Set();
+    selectedDocs = new Set();
+    load();
+  }
+
   onMount(() => {
     load();
     loadTypes();
     loadCollections();
   });
 
-  let canMore = $derived(sources.length < total);
+  let rowCount = $derived(viewMode === 'source' ? sources.length : documents.length);
+  let canMore = $derived(rowCount < total);
   let activeCollection = $derived(
     collectionId === '' ? null : collections.find((c) => c.id === collectionId) ?? null,
   );
+  let unit = $derived(viewMode === 'source' ? 'SOURCE PATH' : 'RECORD');
   let summary = $derived(
-    sources.length === 0
+    rowCount === 0
       ? ''
-      : `SHOWING ${sources.length} OF ${total} SOURCE PATH${total === 1 ? '' : 'S'}` +
+      : `SHOWING ${rowCount} OF ${total} ${unit}${total === 1 ? '' : 'S'}` +
           (activeCollection ? ` · IN "${activeCollection.name.toUpperCase()}"` : '') +
           (q ? ` · MATCHING "${q.toUpperCase()}"` : '')
   );
+  let allTabCount = $derived(
+    viewMode === 'source' ? vaultTotalSources : vaultTotalRecords,
+  );
+  let selectedCount = $derived(
+    viewMode === 'source' ? selectedSources.size : selectedDocs.size,
+  );
+  let allSelected = $derived(rowCount > 0 && selectedCount === rowCount);
 
   function fmtNum(n: number | undefined) {
     return (n ?? 0).toLocaleString();
   }
 
-  function toggleRow(path: string) {
-    const next = new Set(selected);
+  function toggleSourceRow(path: string) {
+    const next = new Set(selectedSources);
     if (next.has(path)) next.delete(path);
     else next.add(path);
-    selected = next;
+    selectedSources = next;
+  }
+  function toggleDocRow(id: string) {
+    const next = new Set(selectedDocs);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedDocs = next;
   }
   function toggleAll() {
-    if (selected.size === sources.length) {
-      selected = new Set();
+    if (viewMode === 'source') {
+      selectedSources =
+        selectedSources.size === sources.length
+          ? new Set()
+          : new Set(sources.map((s) => s.path));
     } else {
-      selected = new Set(sources.map((s) => s.path));
+      selectedDocs =
+        selectedDocs.size === documents.length
+          ? new Set()
+          : new Set(documents.map((d) => d.id));
     }
   }
   function clearSelection() {
-    selected = new Set();
+    selectedSources = new Set();
+    selectedDocs = new Set();
   }
 
   async function createCollection() {
@@ -157,7 +224,7 @@
   }
 
   function openMoveDialog(mode: 'add' | 'remove') {
-    if (selected.size === 0) return;
+    if (selectedCount === 0) return;
     bulkError = undefined;
     bulkTargetId = activeCollection ? activeCollection.id : '';
     collectionDialogMode = mode;
@@ -165,16 +232,19 @@
   }
 
   async function applyMove() {
-    if (bulkBusy || bulkTargetId === '' || selected.size === 0) return;
+    if (bulkBusy || bulkTargetId === '' || selectedCount === 0) return;
     bulkBusy = true;
     bulkError = undefined;
     try {
-      const ids = Array.from(selected);
       const id = bulkTargetId as number;
       const r =
-        collectionDialogMode === 'add'
-          ? await api.collectionAssign(id, ids)
-          : await api.collectionUnassign(id, ids);
+        viewMode === 'source'
+          ? collectionDialogMode === 'add'
+            ? await api.collectionAssign(id, Array.from(selectedSources))
+            : await api.collectionUnassign(id, Array.from(selectedSources))
+          : collectionDialogMode === 'add'
+            ? await api.collectionAssignDocs(id, Array.from(selectedDocs))
+            : await api.collectionUnassignDocs(id, Array.from(selectedDocs));
       if (r.error) {
         bulkError = r.error;
       } else {
@@ -188,11 +258,16 @@
     }
   }
 
-  let allSelected = $derived(sources.length > 0 && selected.size === sources.length);
+  function collectionNamesFor(ids: number[]): string {
+    if (!ids.length) return '';
+    return ids
+      .map((id) => collections.find((c) => c.id === id)?.name ?? `#${id}`)
+      .join(', ');
+  }
 </script>
 
-<ViewHead num="04" title={`DOCUMENTS <span class="slash">/</span> SOURCE INDEX`}
-  desc="Every ingested source path with chunk and record counts. Group sources into collections, filter by collection, drill in." />
+<ViewHead num="04" title={`DOCUMENTS <span class="slash">/</span> VAULT INDEX`}
+  desc="Every ingested record in the vault. Toggle BY RECORD to see individual messages / files / conversations, or BY SOURCE to collapse archives by their source path. Multi-select rows and move them between collections." />
 
 <!-- Collection picker + management strip -->
 <div class="collections-bar">
@@ -200,7 +275,7 @@
     <button class="ctab" type="button"
       class:active={collectionId === ''}
       onclick={() => { collectionId = ''; load(); }}>
-      ALL <span class="count">{vaultTotal}</span>
+      ALL <span class="count">{allTabCount}</span>
     </button>
     {#each collections as c (c.id)}
       <button class="ctab" type="button"
@@ -226,7 +301,10 @@
 </div>
 
 <div class="row">
-  <input type="text" class="input grow" placeholder="filter by path substring (case-sensitive)"
+  <input type="text" class="input grow"
+    placeholder={viewMode === 'record'
+      ? 'filter by title or path substring…'
+      : 'filter by path substring…'}
     value={q} oninput={onQ} />
   <select class="select fixed" bind:value={type} onchange={load}>
     <option value="">all types</option>
@@ -238,15 +316,29 @@
     <option value="name">sort: name</option>
     <option value="date">sort: newest first</option>
     <option value="chunks">sort: most chunks</option>
-    <option value="records">sort: most records</option>
+    {#if viewMode === 'source'}
+      <option value="records">sort: most records</option>
+    {/if}
   </select>
+  <div class="mode-toggle" role="radiogroup" aria-label="View mode">
+    <button class="mtog" type="button" role="radio"
+      aria-checked={viewMode === 'record'}
+      class:active={viewMode === 'record'}
+      onclick={() => setMode('record')}
+      title="One row per ingested record (each Slack message, each PDF, each conversation)">BY RECORD</button>
+    <button class="mtog" type="button" role="radio"
+      aria-checked={viewMode === 'source'}
+      class:active={viewMode === 'source'}
+      onclick={() => setMode('source')}
+      title="Group records by source_path (archives collapse to one row)">BY SOURCE</button>
+  </div>
 </div>
 
 <div class="summary">
   <span>{summary}</span>
-  {#if selected.size > 0}
+  {#if selectedCount > 0}
     <span class="bulk-actions">
-      {selected.size} selected ·
+      {selectedCount} selected ·
       <button class="link" type="button" onclick={() => openMoveDialog('add')}>move to collection</button>
       {#if activeCollection}
         <span class="sep">·</span>
@@ -258,16 +350,16 @@
   {/if}
 </div>
 
-{#if loading && sources.length === 0}
+{#if loading && rowCount === 0}
   <div class="loading"><span class="glyph">::</span>loading documents...</div>
-{:else if sources.length === 0}
+{:else if rowCount === 0}
   <div class="empty">
     <span class="glyph">::</span>
     {activeCollection
-      ? `no documents in "${activeCollection.name}". Switch to ALL above and select rows to move them in.`
-      : 'no documents match. use the ingest tab to add files.'}
+      ? `no ${viewMode === 'record' ? 'records' : 'sources'} in "${activeCollection.name}". Switch to ALL above and select rows to move them in.`
+      : 'nothing in the vault matches. Use the Ingest tab to add files, or clear the filters above.'}
   </div>
-{:else}
+{:else if viewMode === 'source'}
   <table class="doc-table">
     <thead><tr>
       <th class="check">
@@ -278,11 +370,11 @@
     </tr></thead>
     <tbody>
       {#each sources as s (s.path)}
-        <tr class:selected={selected.has(s.path)}>
+        <tr class:selected={selectedSources.has(s.path)}>
           <td class="check">
             <input type="checkbox"
-              checked={selected.has(s.path)}
-              onchange={() => toggleRow(s.path)}
+              checked={selectedSources.has(s.path)}
+              onchange={() => toggleSourceRow(s.path)}
               aria-label={`Select ${s.path}`} />
           </td>
           <td><span class="badge {s.file_type}">{s.file_type}</span></td>
@@ -299,6 +391,47 @@
       <button class="btn btn-secondary btn-sm" onclick={loadMore}>LOAD MORE</button>
     </div>
   {/if}
+{:else}
+  <table class="doc-table">
+    <thead><tr>
+      <th class="check">
+        <input type="checkbox" checked={allSelected} onchange={toggleAll}
+          aria-label="Select all visible records" />
+      </th>
+      <th>Type</th><th>Title / Source</th><th>Chunks</th><th>Collections</th><th>Ingested</th>
+    </tr></thead>
+    <tbody>
+      {#each documents as d (d.id)}
+        <tr class:selected={selectedDocs.has(d.id)}>
+          <td class="check">
+            <input type="checkbox"
+              checked={selectedDocs.has(d.id)}
+              onchange={() => toggleDocRow(d.id)}
+              aria-label={`Select ${d.title ?? d.id}`} />
+          </td>
+          <td><span class="badge {d.file_type}">{d.file_type}</span></td>
+          <td class="path">
+            {#if d.title}<span class="title">{d.title}</span>{/if}
+            <span class="sub">{d.source_path}</span>
+          </td>
+          <td><span class="num">{fmtNum(d.chunk_count)}</span></td>
+          <td class="cols">
+            {#if d.collection_ids.length === 0}
+              <span class="dim">—</span>
+            {:else}
+              {collectionNamesFor(d.collection_ids)}
+            {/if}
+          </td>
+          <td>{d.ingested_at ?? '—'}</td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
+  {#if canMore}
+    <div class="more"><span class="info">{documents.length} / {total}</span>
+      <button class="btn btn-secondary btn-sm" onclick={loadMore}>LOAD MORE</button>
+    </div>
+  {/if}
 {/if}
 
 {#if collectionDialogOpen}
@@ -309,18 +442,30 @@
     <div class="modal">
       <div class="modal-head">
         <span class="modal-title">
-          {collectionDialogMode === 'add'
-            ? `MOVE ${selected.size} SOURCE PATH${selected.size === 1 ? '' : 'S'}`
-            : `REMOVE ${selected.size} SOURCE PATH${selected.size === 1 ? '' : 'S'}`}
+          {#if viewMode === 'record'}
+            {collectionDialogMode === 'add'
+              ? `MOVE ${selectedCount} RECORD${selectedCount === 1 ? '' : 'S'}`
+              : `REMOVE ${selectedCount} RECORD${selectedCount === 1 ? '' : 'S'}`}
+          {:else}
+            {collectionDialogMode === 'add'
+              ? `MOVE ${selectedCount} SOURCE PATH${selectedCount === 1 ? '' : 'S'}`
+              : `REMOVE ${selectedCount} SOURCE PATH${selectedCount === 1 ? '' : 'S'}`}
+          {/if}
         </span>
         <button class="modal-close" type="button"
           onclick={() => (collectionDialogOpen = false)}>×</button>
       </div>
       <div class="modal-body">
         <p class="desc">
-          {collectionDialogMode === 'add'
-            ? 'Pick the destination collection. The selected source paths will be added; existing memberships are unaffected (a path can be in multiple collections).'
-            : 'Pick the collection to remove these source paths from. The documents themselves are not deleted.'}
+          {#if viewMode === 'record'}
+            {collectionDialogMode === 'add'
+              ? 'Pick the destination collection. Each selected record is added individually; existing memberships are unaffected (a record can be in multiple collections).'
+              : 'Pick the collection to remove these records from. The records themselves are not deleted.'}
+          {:else}
+            {collectionDialogMode === 'add'
+              ? 'Pick the destination collection. The selected source paths will be added — every record at each path joins the collection.'
+              : 'Pick the collection to remove these source paths from. The documents themselves are not deleted.'}
+          {/if}
         </p>
         <select class="select" bind:value={bulkTargetId}>
           <option value="">choose collection…</option>
@@ -434,7 +579,44 @@
   .doc-table tr:hover td { background: var(--surface); }
   .doc-table tr.selected td { background: var(--amber-soft); }
   .doc-table .path { color: var(--text); word-break: break-all; font-size: 11px; }
+  .doc-table .path .title {
+    display: block; color: var(--text-bright); font-weight: 700;
+    font-size: 12px; letter-spacing: 0.3px; margin-bottom: 2px;
+  }
+  .doc-table .path .sub {
+    display: block; font-size: 10px; color: var(--text-dim);
+    word-break: break-all;
+  }
   .doc-table .num { color: var(--amber); font-weight: 700; letter-spacing: 1px; }
+  .doc-table .cols {
+    color: var(--teal); font-size: 11px; letter-spacing: 0.3px;
+  }
+  .doc-table .cols .dim { color: var(--text-dim); }
+
+  /* mode toggle inside the filter row */
+  .mode-toggle {
+    display: inline-flex; gap: 0;
+    border: 1px solid var(--border);
+  }
+  .mtog {
+    background: var(--surface);
+    border: 0;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 8px 14px;
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-weight: 700;
+    transition: 120ms ease;
+  }
+  .mtog + .mtog { border-left: 1px solid var(--border); }
+  .mtog:hover { color: var(--text-bright); }
+  .mtog.active {
+    color: var(--amber);
+    background: var(--amber-soft);
+  }
   .doc-table input[type='checkbox'] {
     accent-color: var(--amber);
     width: 14px; height: 14px;

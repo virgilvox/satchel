@@ -50,13 +50,23 @@
   const ctxOptions: ContextSize[] = ['auto', 4096, 8192, 16384, 32768];
   const slidingOptions: SlidingSize[] = ['off', 1024, 2048, 4096, 8192];
 
+  // WebLLM rejects when both context_window_size and sliding_window_size
+  // are positive. Picking one here forces the other back to its sentinel
+  // (auto / off) so the engine load can't fail with the dual-positive
+  // error.
   function setCtx(v: string) {
     if (v === 'auto') return chatSettings.setContextWindowSize('auto');
     chatSettings.setContextWindowSize(Number(v) as ContextSize);
+    if (chatSettings.slidingWindowSize !== 'off') {
+      chatSettings.setSlidingWindowSize('off');
+    }
   }
   function setSliding(v: string) {
     if (v === 'off') return chatSettings.setSlidingWindowSize('off');
     chatSettings.setSlidingWindowSize(Number(v) as SlidingSize);
+    if (chatSettings.contextWindowSize !== 'auto') {
+      chatSettings.setContextWindowSize('auto');
+    }
   }
 
   function fmt(v: number, digits = 2): string {
@@ -231,6 +241,9 @@
       CONTEXT
       {#if engineLoaded}<span class="hint">· UNLOAD + RELOAD to apply</span>{/if}
     </div>
+    <p class="desc">
+      Pick one strategy — the two are mutually exclusive. WebLLM rejects a load that sets both. Setting one resets the other automatically.
+    </p>
 
     <div class="row" class:disabled={engineLoaded}>
       <div class="row-head">
