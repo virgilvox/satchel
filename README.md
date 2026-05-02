@@ -199,8 +199,11 @@ REST surface:
 - `POST /api/collections/:id/sources` — `{source_paths: [...]}` to assign
 - `DELETE /api/collections/:id/sources` — same body, to unassign
 - `GET /api/sources?collection_id=N` — filter the existing sources index
+- `POST /api/search { ..., collection_id: N }` — scope retrieval to a collection (v1.6.1+)
 
-(Filtering MCP `search_knowledge` by collection is a v1.6.x follow-up — the schema and routes are ready; the chat-search side is unchanged for now.)
+MCP surface (v1.6.1+):
+- `search_knowledge` accepts `collection_name` (preferred — the user-facing label) or `collection_id`. An unknown `collection_name` returns a tool error so the agent can correct.
+- `list_collections` enumerates the collections so the agent can discover names before scoping a query.
 
 ## Supported File Types
 

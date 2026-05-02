@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.6.2 — 2026-05-01
+
+Audit-driven follow-up to v1.6.1.
+
+### `list_collections` MCP tool
+
+`search_knowledge`'s `collection_name` argument was unreachable for AI
+agents in v1.6.1 — the agent had no way to discover what names exist.
+Added a sixth MCP tool, `list_collections`, that returns each
+collection's name, id, and document_count. Empty surface returns a
+hint pointing at the Documents tab. Pair with `search_knowledge` to
+let an agent scope a query to "the work notes" without coordination.
+
+### Documents tab — ALL count is the vault count
+
+The ALL tab's count was tied to the filtered `total`, so clicking
+"Work" made the ALL tab read out the work count too. Now `vaultTotal`
+is tracked separately and the ALL tab always reflects the unfiltered
+size. One extra `/api/sources?limit=1` call when filtered, free
+otherwise.
+
+### Tests + docs
+
+- Two new MCP integration tests (mcp_handler_test went 5 → 7):
+  `test_mcp_search_with_collection_name` exercises the resolve-by-name
+  path and the unknown-name error case;
+  `test_mcp_list_collections` covers empty and populated surfaces.
+- Tool-count assertions bumped (5 → 6) in both unit and integration.
+- README's Collections section now lists the v1.6.1 search-by-collection
+  REST + MCP surface (was still flagged as a "v1.6.x follow-up").
+- `mockups/` added to `.gitignore` so design-reference HTML stops
+  showing up in `git status`.
+
 ## v1.6.1 — 2026-05-01
 
 ### Search scoped to a collection (REST + MCP)

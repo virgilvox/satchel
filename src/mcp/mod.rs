@@ -130,6 +130,14 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "list_collections",
+                "description": "List the named collections (subsets of the vault). Returns each collection's id, name, and document_count. Pair with `search_knowledge`'s `collection_name` argument to scope a query.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -166,6 +174,7 @@ pub async fn handle_request(request: &JsonRpcRequest, db: &Database, embedder: &
                 "get_document" => handle_get_document(args, db),
                 "list_tags" => handle_list_tags(db),
                 "vault_stats" => handle_vault_stats(db),
+                "list_collections" => handle_list_collections(db),
                 _ => tool_error(&format!("Unknown tool: {tool_name}")),
             }
         }
@@ -339,6 +348,23 @@ fn handle_vault_stats(db: &Database) -> Value {
     }
 }
 
+fn handle_list_collections(db: &Database) -> Value {
+    match db.list_collections() {
+        Ok(cs) if cs.is_empty() => tool_text(
+            "No collections defined. Create one in the web UI's Documents tab, then pass `collection_name` to `search_knowledge` to scope queries.",
+        ),
+        Ok(cs) => {
+            let text = cs
+                .iter()
+                .map(|c| format!("{} (id={}, {} docs)", c.name, c.id, c.document_count))
+                .collect::<Vec<_>>()
+                .join("\n");
+            tool_text(&text)
+        }
+        Err(e) => tool_error(&format!("Error: {e}")),
+    }
+}
+
 pub fn print_client_config(client: &str, _vault_path: &Path) -> Result<()> {
     let bin = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -419,9 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_definitions_has_five_tools() {
+    fn test_tool_definitions_has_six_tools() {
         let defs = tool_definitions();
-        assert_eq!(defs["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(defs["tools"].as_array().unwrap().len(), 6);
     }
 
     #[test]
@@ -438,6 +464,7 @@ mod tests {
         assert!(names.contains(&"get_document"));
         assert!(names.contains(&"list_tags"));
         assert!(names.contains(&"vault_stats"));
+        assert!(names.contains(&"list_collections"));
     }
 
     #[test]
@@ -481,7 +508,7 @@ mod tests {
             &Embedder::fixed(384),
         )
         .await;
-        assert_eq!(result["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 6);
     }
 
     #[tokio::test]

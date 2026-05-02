@@ -10,6 +10,10 @@
   let collectionId: number | '' = $state('');
   let sources = $state<SourceRow[]>([]);
   let total = $state(0);
+  // Whole-vault count, independent of collection / search filters. The ALL
+  // tab displays this so it stays accurate when the user is filtered into a
+  // collection. Refreshed alongside the filtered list.
+  let vaultTotal = $state(0);
   let loading = $state(true);
   let types = $state<FileTypeStat[]>([]);
   let collections = $state<CollectionSummary[]>([]);
@@ -42,6 +46,15 @@
       });
       sources = r.sources ?? [];
       total = r.total ?? 0;
+      // If we're already viewing the unfiltered vault, the same response gives
+      // us the vault total for free. Otherwise refresh it separately so the
+      // ALL tab's count is right even while the user is scoped to a collection.
+      if (collectionId === '' && !q && !type) {
+        vaultTotal = total;
+      } else {
+        const u = await api.sources({ limit: 1, offset: 0 });
+        vaultTotal = u.total ?? vaultTotal;
+      }
     } finally {
       loading = false;
     }
@@ -187,7 +200,7 @@
     <button class="ctab" type="button"
       class:active={collectionId === ''}
       onclick={() => { collectionId = ''; load(); }}>
-      ALL <span class="count">{collections.reduce((acc, c) => acc + 0, total)}</span>
+      ALL <span class="count">{vaultTotal}</span>
     </button>
     {#each collections as c (c.id)}
       <button class="ctab" type="button"

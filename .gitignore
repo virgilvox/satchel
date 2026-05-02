@@ -1,5 +1,6 @@
 /target
 /bin/
+/mockups/
 /vault/vaults/*/satchel.db
 /vault/vaults/*/satchel.db-wal
 /vault/vaults/*/satchel.db-shm
