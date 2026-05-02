@@ -240,6 +240,7 @@ impl Database {
     ///
     /// `query_text` is what FTS5 tokenizes for keyword matching. Pass the same
     /// natural-language string the user typed; do not pre-tokenize.
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         query_embedding: &[f32],
@@ -839,7 +840,7 @@ impl Database {
                 "DELETE FROM document_collections WHERE collection_id = ?1 AND document_id = ?2",
             )?;
             for doc_id in document_ids {
-                removed += stmt.execute(params![id, doc_id])? as usize;
+                removed += stmt.execute(params![id, doc_id])?;
             }
         }
         tx.commit()?;

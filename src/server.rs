@@ -241,7 +241,7 @@ async fn api_sources(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SourcesQuery>,
 ) -> Json<Value> {
-    let limit = q.limit.unwrap_or(50).min(1000).max(1);
+    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0);
     match state.db.list_sources(
         q.filter_type.as_deref(),
@@ -338,12 +338,22 @@ struct DeleteRequest {
     file_type: Option<String>,
     #[serde(default)]
     dry_run: bool,
+    /// Mirrors `/api/clear`: a write-mode call must explicitly opt in.
+    /// Defaults false so a stray DELETE never wipes documents from a
+    /// tunneled vault.
+    #[serde(default)]
+    confirm: bool,
 }
 
 async fn api_delete_sources(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeleteRequest>,
 ) -> Json<Value> {
+    if !req.dry_run && !req.confirm {
+        return Json(json!({
+            "error": "destructive operation: pass {\"confirm\": true} or {\"dry_run\": true}"
+        }));
+    }
     let result = match (req.path, req.prefix, req.file_type) {
         (Some(p), None, None) => state.db.delete_by_path_exact(&p, req.dry_run),
         (None, Some(pre), None) => state.db.delete_by_path_prefix(&pre, req.dry_run),

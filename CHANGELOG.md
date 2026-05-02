@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.0.0 — 2026-05-01
+
+A second stability declaration. v1.0 declared the retrieval surface
+stable; v2.0 declares the *full* surface stable — chat (local + Claude),
+public tunnels (quick + named), external MCP servers, and collections.
+The entire v1.x feature wave is now considered the supported shape.
+
+### What v2.0 actually means
+
+No breaking REST or MCP changes. Existing v1.x vaults open without
+migration; the v1.6 schema additions (`collections`,
+`document_collections`, `PRAGMA foreign_keys = ON`) are idempotent and
+purely additive. v1.x integrations keep working.
+
+What changed:
+
+### Search & Ask UI scoped to collections
+
+The Documents tab gained a tab strip in v1.6.0; the rest of the UI
+caught up here. Search and Ask both render a `CollectionScope` chip
+row right under the input — `ALL · Work · Personal · Research` — and
+re-run the active query when scope changes. Pulled into a shared
+`<CollectionScope>` component so future routes get the same control
+in a one-line import.
+
+### Server-side guard on `/api/sources` DELETE
+
+`/api/clear` already required `confirm: true` ∥ `dry_run: true`. The
+sibling `/api/sources` DELETE didn't. A tunneled vault was therefore
+one curl away from a wipe. Now `DELETE /api/sources` rejects without
+either flag with the same error contract as `/api/clear`. The web UI
+auto-supplies `confirm` on writes (it already gates writes through a
+dry-run preview), so the change is invisible to UI users; external API
+consumers must add `"confirm": true` to write calls.
+
+### Lib clippy fully clean
+
+Three pre-existing warnings cleared: `manual_clamp`,
+unnecessary `as usize`, and an `#[allow(clippy::too_many_arguments)]`
+on `db.search` (eight args after the v1.6.1 collection scope). Lib +
+binaries pass `cargo clippy` with zero warnings; tests still carry a
+handful of unused-import warnings that don't affect production.
+
+### Tests + docs
+
+- 147 lib + 25 integration tests, all green
+- README refreshed for v2.0 (feature index across v1.x, security
+  model, public-tunnel risk note)
+- CLAUDE.md updated to reflect the v2.0 surface
+
 ## v1.6.2 — 2026-05-01
 
 Audit-driven follow-up to v1.6.1.

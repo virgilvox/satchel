@@ -158,9 +158,9 @@ Then in claude.ai → Settings → Connectors → Add Custom Connector, point it
 Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428):
 
 - **Dashboard** — vault stats, quick search, embedding-model status.
-- **Ask** — conversational entry to the vault. Phrase a question; a tool-call card runs `search_knowledge` and returns the top passages with source attribution. Pure retrieval — no LLM, no network roundtrip.
+- **Ask** — conversational entry to the vault. Phrase a question; a tool-call card runs `search_knowledge` and returns the top passages with source attribution. Scope-chip row above the input pins the query to a single collection or runs against the whole vault. Pure retrieval — no LLM, no network roundtrip.
 - **Chat** — picker spans two backends. **Local · WebLLM** runs a small model (Llama 3.2 1B/3B, Hermes 3, Qwen 2.5, Phi 3.5, Gemma 2, DeepSeek R1, …) entirely in your browser via WebGPU; output is locked to a per-tool JSON schema by an XGrammar logit mask. **Anthropic API** (Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5) streams through a server-side proxy with your saved API key — see *Settings → Anthropic API*. Tool calls go to the same MCPs either way. Reasoning blocks emitted as `<think>…</think>` render in a collapsible panel; tool calls render compact (collapsed by default) and expand on click.
-- **Search** — full hybrid retrieval with score ranking.
+- **Search** — full hybrid retrieval with score ranking. Same scope-chip row as Ask narrows the query to a single collection.
 - **Documents** — browse ingested files. Group sources into **collections** (named subsets like "Work", "Research", "Personal"), filter by collection with a tab strip, multi-select rows + bulk move into a collection.
 - **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. Multiple folders run concurrently with live progress (files seen, records added/skipped/failed, current file, elapsed time).
 - **Manage** — delete documents by path prefix or file type, or wipe the vault.
@@ -182,15 +182,15 @@ The **Connect** tab has a "Public Tunnel" panel. Two modes:
 
 Release downloads bundle the per-platform `cloudflared` binary so it works out of the box. Source builds use whatever `cloudflared` is on `$PATH` (`brew install cloudflared` / `winget install Cloudflare.cloudflared` / `apt install cloudflared`).
 
-> ⚠️ A live tunnel exposes your vault on the public internet. Anyone with the URL can hit `/api/search` and `/mcp`. Stop the tunnel when you're done.
+> ⚠️ A live tunnel exposes your vault on the public internet. Anyone with the URL can hit `/api/search` and `/mcp`. Destructive endpoints (`/api/clear`, `/api/sources DELETE`) require an explicit `{"confirm": true}` so a stray request can't silently wipe the vault, but the read surface is open. Stop the tunnel when you're done.
 
 ## Collections
 
-Group ingested sources into named subsets (a "Work" collection, a "Research" collection, a "Personal" collection) and filter the Documents tab by collection. New in v1.6.0:
+Group ingested sources into named subsets (a "Work" collection, a "Research" collection, a "Personal" collection) and scope retrieval to whichever you want — Documents (tab strip), Search and Ask (chip row), or AI agents through the MCP. Documents stay in the vault when a collection is deleted — only the membership goes.
 
-- Documents-tab strip shows tabs for every collection + an `ALL` view.
-- Multi-select rows (header checkbox toggles all visible) and bulk **move to collection** / **remove from collection**.
-- Documents stay in the vault when a collection is deleted — only the membership goes.
+- **Documents** tab strip shows tabs for every collection + an `ALL` view, with multi-select rows and a bulk **move to collection** / **remove from collection** modal.
+- **Search** and **Ask** show a `scope` chip row above the input. Switching scope re-runs the active query.
+- **MCP** has `list_collections` for discovery and `search_knowledge` accepts `collection_name` (preferred) or `collection_id` for autonomous scoping.
 
 REST surface:
 - `GET /api/collections` — list with `document_count`

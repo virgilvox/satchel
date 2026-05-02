@@ -3,6 +3,7 @@
   import ResultList from '../components/ResultList.svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import Modal from '../components/Modal.svelte';
+  import CollectionScope from '../components/CollectionScope.svelte';
   import { api } from '../lib/api';
   import type { SearchResult } from '../lib/types';
 
@@ -12,7 +13,9 @@
   let loading = $state(false);
   let error = $state<string | undefined>();
   let lastQuery = $state('');
+  let scope: number | '' = $state('');
   const PAGE = 20;
+  const scopeId = () => (scope === '' ? undefined : (scope as number));
 
   // Context modal state
   let ctxOpen = $state(false);
@@ -27,7 +30,7 @@
     loading = true;
     error = undefined;
     try {
-      const r = await api.search(query, PAGE, 0);
+      const r = await api.search(query, PAGE, 0, scopeId());
       if (r.error) { error = r.error; results = []; total = 0; }
       else { results = r.results ?? []; total = r.total ?? 0; }
       lastQuery = query;
@@ -39,11 +42,15 @@
   }
 
   async function more() {
-    const r = await api.search(lastQuery, PAGE, results.length);
+    const r = await api.search(lastQuery, PAGE, results.length, scopeId());
     if (!r.error) {
       results = [...results, ...(r.results ?? [])];
       total = r.total ?? total;
     }
+  }
+
+  function onScopeChange() {
+    if (lastQuery) run(lastQuery);
   }
 
   async function showContext(result: SearchResult) {
@@ -69,6 +76,7 @@
   desc="Semantic embeddings fused with keyword FTS via Reciprocal Rank Fusion. Higher score = more on-topic." />
 
 <SearchBox bind:value={q} placeholder="natural-language query..." onsubmit={run} />
+<CollectionScope bind:value={scope} onchange={onScopeChange} />
 
 <div class="results">
   <ResultList {results} {total} {loading} {error}

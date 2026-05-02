@@ -95,11 +95,15 @@ export const api = {
   jobs: () => getJson<{ jobs: IngestJob[] }>('/api/jobs'),
 
   deleteSources: (
-    body: { path?: string; prefix?: string; file_type?: string; dry_run: boolean }
+    body: { path?: string; prefix?: string; file_type?: string; dry_run: boolean; confirm?: boolean }
   ) =>
     deleteJson<{ deleted_documents: number; deleted_chunks: number; error?: string }>(
       '/api/sources',
-      body
+      // The server requires `confirm: true` on a write call as a safety
+      // gate. Auto-supply it when the caller is doing a write (dry_run
+      // false) — the UI flow already collects an explicit confirmation
+      // before invoking this.
+      { ...body, confirm: body.confirm ?? !body.dry_run },
     ),
 
   clear: (body: { confirm?: boolean; dry_run?: boolean }) =>

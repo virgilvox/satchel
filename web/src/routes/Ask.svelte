@@ -3,12 +3,15 @@
   import Mark from '../components/Mark.svelte';
   import Composer from '../components/Composer.svelte';
   import MessageBubble from '../components/MessageBubble.svelte';
+  import CollectionScope from '../components/CollectionScope.svelte';
   import { api } from '../lib/api';
   import type { ChatMessage, ToolCallResult } from '../lib/types';
 
   let transcript = $state<ChatMessage[]>([]);
   let busy = $state(false);
+  let scope: number | '' = $state('');
   const ASK_LIMIT = 5;
+  const scopeId = () => (scope === '' ? undefined : (scope as number));
 
   const examples = [
     'recent decisions about hiring',
@@ -36,7 +39,7 @@
     setTimeout(() => stream?.scrollTo({ top: stream.scrollHeight, behavior: 'smooth' }));
 
     try {
-      const r = await api.search(query, ASK_LIMIT, 0);
+      const r = await api.search(query, ASK_LIMIT, 0, scopeId());
       const updated: ToolCallResult = {
         ...pendingCall, pending: false,
         result: r.error
@@ -76,6 +79,8 @@
 
 <ViewHead num="02" title={`ASK <span class="slash">/</span> CONVERSATIONAL SEARCH`}
   desc="Phrase a question; the vault answers with the most relevant passages. Pure retrieval — no LLM." />
+
+<CollectionScope bind:value={scope} />
 
 <div class="stream" bind:this={stream}>
   {#if transcript.length === 0}
