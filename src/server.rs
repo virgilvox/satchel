@@ -214,6 +214,17 @@ async fn mcp_handler(
 
 async fn api_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let stats = state.db.stats().ok();
+    let active_name = crate::vault::get_active_vault(&state.vault_path);
+    let active_dir = crate::vault::active_vault_path(&state.vault_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let other_vaults = crate::vault::list_vaults_info(&state.vault_path)
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| !v.active)
+        .collect::<Vec<_>>();
+    let legacy = crate::vault::legacy_bases(&state.vault_path);
     Json(json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -224,7 +235,20 @@ async fn api_status(State(state): State<Arc<AppState>>) -> Json<Value> {
             "chunks": s.chunk_count,
             "dimensions": s.embedding_dims,
             "db_size": s.db_size_human,
-        }))
+        })),
+        "vault": {
+            "name": active_name,
+            "path": active_dir,
+            "base_path": state.vault_path.to_string_lossy().to_string(),
+            // Sibling vaults under the same base.
+            "siblings": other_vaults,
+            // SATCHEL bases discovered elsewhere on disk that aren't the
+            // chosen one — most commonly an old `~/vault` from a v1.x
+            // launch. If non-empty, the UI can prompt the user with
+            // "this much data is sitting at <path>; restart with
+            // --vault <path> to use it."
+            "legacy_bases": legacy,
+        },
     }))
 }
 

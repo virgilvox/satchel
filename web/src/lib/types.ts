@@ -19,12 +19,29 @@ export interface VaultStats {
   db_size: string;
 }
 
+export interface VaultListEntry {
+  name: string;
+  path: string;
+  size_bytes: number;
+  size_human: string;
+  active: boolean;
+}
+
+export interface VaultInfo {
+  name: string | null;
+  path: string | null;
+  base_path: string;
+  siblings: VaultListEntry[];
+  legacy_bases: VaultListEntry[];
+}
+
 export interface StatusResponse {
   status: string;
   version: string;
   embedding_model: string;
   embedding_available: boolean;
   stats?: VaultStats;
+  vault?: VaultInfo;
 }
 
 export interface SearchResult {

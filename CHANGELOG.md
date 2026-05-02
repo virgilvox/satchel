@@ -1,5 +1,48 @@
 # Changelog
 
+## v2.1.1 — 2026-05-02
+
+### Surface "you may be looking at the wrong vault" in the UI
+
+A user upgrading from v1.x reported the Dashboard count showing only
+their most recent ingest (a single mbox archive) and not the much
+larger pile of records they'd ingested previously. The records weren't
+lost — SATCHEL was opening a different vault than the one their old
+data lived in. v1.x stored vaults in `./vault`, `~/vault`, or the
+platform data dir (`~/Library/Application Support/satchel`,
+`%APPDATA%/satchel`, `$XDG_DATA_HOME/satchel`) depending on how it
+was launched, and nothing in the web UI told you which one you'd
+landed on.
+
+Fixed at the data layer:
+
+- `/api/status` now returns a `vault` block: `{ name, path, base_path,
+  siblings: [...], legacy_bases: [...] }`.
+- `siblings` enumerates every vault under the active base — the user's
+  other named vaults that aren't currently selected.
+- `legacy_bases` checks `./vault` and `~/vault` for SATCHEL-shaped
+  layouts (a `satchel.toml` or `vaults/` subdir) that aren't the
+  chosen base. If `~/vault` has 1.2 GB of `satchel.db` and the active
+  vault has 8 KB, this is the smoking gun.
+
+Surfaced in the Dashboard:
+
+- A small `ACTIVE VAULT · <name> · <full-path>` strip sits at the top
+  so you always know which vault produced the count below.
+- An amber banner appears when other SATCHEL data is detected nearby,
+  with the exact CLI to switch — `satchel vault use <name>` for
+  siblings or `--vault <path>` for legacy bases — and the byte
+  totals so the size mismatch is unmissable.
+
+### `vault::list_vaults_info` + `vault::legacy_bases`
+
+New library API for the same diagnostics. Returns
+`Vec<VaultListEntry>` with `{name, path, size_bytes, size_human,
+active}`. `get_active_vault` is now `pub` so the server can resolve
+the active name without going through stdout.
+
+148 lib + 25 integration tests, all green.
+
 ## v2.1.0 — 2026-05-02
 
 ### Documents tab — BY RECORD view
