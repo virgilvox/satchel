@@ -10,11 +10,18 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
+use crate::anthropic::{self, AnthropicConfig};
 use crate::embed::Embedder;
 use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
+use crate::mcp_proxy::{self, McpServerEntry, McpServersConfig};
 use crate::rag::Database;
 use crate::tunnel::{TunnelConfig, TunnelManager, TunnelMode};
+use axum::body::Body;
+use axum::extract::Path as AxPath;
+use axum::http::HeaderName;
+use axum::response::Response;
+use futures_util::StreamExt;
 use std::path::PathBuf;
 
 // The web UI is built from `web/` (Svelte 5 + Vite) into a single
@@ -73,6 +80,22 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
                 .post(api_tunnel_config_set)
                 .delete(api_tunnel_config_clear),
         )
+        .route(
+            "/api/anthropic/config",
+            get(api_anthropic_config_get)
+                .post(api_anthropic_config_set)
+                .delete(api_anthropic_config_clear),
+        )
+        .route("/api/anthropic/messages", post(api_anthropic_messages))
+        .route(
+            "/api/mcp/servers",
+            get(api_mcp_servers_list).post(api_mcp_servers_upsert),
+        )
+        .route(
+            "/api/mcp/servers/:id",
+            axum::routing::delete(api_mcp_servers_delete),
+        )
+        .route("/api/mcp/proxy/:id", post(api_mcp_proxy))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -796,3 +819,217 @@ async fn api_tunnel_config_clear(State(state): State<Arc<AppState>>) -> Json<Val
 // it via the snapshot, the import is needed for `cfg!`-style use elsewhere.
 #[allow(dead_code)]
 fn _tunnel_mode_referenced(_m: TunnelMode) {}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Anthropic — server-side proxy so the API key stays server-side and so we
+// can dodge the browser CORS gates around api.anthropic.com.
+// ─────────────────────────────────────────────────────────────────────────
+
+async fn api_anthropic_config_get(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match AnthropicConfig::load(&state.vault_path) {
+        Ok(Some(_)) => Json(json!({ "configured": true })),
+        Ok(None) => Json(json!({ "configured": false })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetAnthropicRequest {
+    api_key: String,
+}
+
+async fn api_anthropic_config_set(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetAnthropicRequest>,
+) -> Json<Value> {
+    let key = req.api_key.trim().to_string();
+    if key.is_empty() {
+        return Json(json!({ "error": "api_key must not be empty" }));
+    }
+    let cfg = AnthropicConfig { api_key: key };
+    match cfg.save(&state.vault_path) {
+        Ok(_) => Json(json!({ "configured": true })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_anthropic_config_clear(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match AnthropicConfig::clear(&state.vault_path) {
+        Ok(_) => Json(json!({ "configured": false })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+async fn api_anthropic_messages(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let cfg = match AnthropicConfig::load(&state.vault_path) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return error_response(
+                StatusCode::PRECONDITION_REQUIRED,
+                "anthropic api key not configured — Settings → Anthropic API to add one",
+            );
+        }
+        Err(e) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+    };
+    let upstream = match anthropic::proxy_messages(&cfg.api_key, body).await {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_GATEWAY, &e.to_string()),
+    };
+    forward_streaming_response(upstream)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// External MCP servers — store the auth headers server-side; expose the
+// safe shape ({ id, name, url, has_auth }) to the browser; proxy raw
+// JSON-RPC through `/api/mcp/proxy/:id`.
+// ─────────────────────────────────────────────────────────────────────────
+
+async fn api_mcp_servers_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match McpServersConfig::load(&state.vault_path) {
+        Ok(cfg) => Json(json!({
+            "servers": cfg.servers.iter().map(|s| json!({
+                "id": s.id,
+                "name": s.name,
+                "url": s.url,
+                "has_auth": !s.headers.is_empty(),
+            })).collect::<Vec<_>>(),
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpsertMcpRequest {
+    id: String,
+    name: String,
+    url: String,
+    /// Optional: `{ "Authorization": "Bearer xxx", … }`
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+async fn api_mcp_servers_upsert(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpsertMcpRequest>,
+) -> Json<Value> {
+    let mut cfg = match McpServersConfig::load(&state.vault_path) {
+        Ok(c) => c,
+        Err(e) => return Json(json!({ "error": e.to_string() })),
+    };
+    let entry = McpServerEntry {
+        id: req.id.trim().to_string(),
+        name: req.name.trim().to_string(),
+        url: req.url.trim().to_string(),
+        headers: req
+            .headers
+            .into_iter()
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+            .collect(),
+    };
+    if let Err(e) = cfg.upsert(entry) {
+        return Json(json!({ "error": e.to_string() }));
+    }
+    if let Err(e) = cfg.save(&state.vault_path) {
+        return Json(json!({ "error": e.to_string() }));
+    }
+    Json(json!({ "ok": true }))
+}
+
+async fn api_mcp_servers_delete(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<String>,
+) -> Json<Value> {
+    let mut cfg = match McpServersConfig::load(&state.vault_path) {
+        Ok(c) => c,
+        Err(e) => return Json(json!({ "error": e.to_string() })),
+    };
+    if !cfg.remove(&id) {
+        return Json(json!({ "error": format!("no mcp server with id '{id}'") }));
+    }
+    if let Err(e) = cfg.save(&state.vault_path) {
+        return Json(json!({ "error": e.to_string() }));
+    }
+    Json(json!({ "ok": true }))
+}
+
+async fn api_mcp_proxy(
+    State(state): State<Arc<AppState>>,
+    AxPath(id): AxPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let cfg = match McpServersConfig::load(&state.vault_path) {
+        Ok(c) => c,
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let entry = match cfg.find(&id) {
+        Some(e) => e.clone(),
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no mcp server with id '{id}'"),
+            );
+        }
+    };
+    // Translate axum HeaderMap -> reqwest HeaderMap (just the bits we
+    // forward — currently only the MCP session id).
+    let mut fwd = reqwest::header::HeaderMap::new();
+    if let Some(v) = headers.get("mcp-session-id") {
+        if let Ok(name) = HeaderName::try_from("mcp-session-id") {
+            if let Ok(val) = reqwest::header::HeaderValue::from_bytes(v.as_bytes()) {
+                fwd.insert(
+                    name.as_str()
+                        .parse::<reqwest::header::HeaderName>()
+                        .unwrap(),
+                    val,
+                );
+            }
+        }
+    }
+    match mcp_proxy::proxy_call(&entry, body, &fwd).await {
+        Ok(res) => forward_streaming_response(res),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, &e.to_string()),
+    }
+}
+
+// ─── shared helpers ───
+
+fn error_response(code: StatusCode, message: &str) -> Response {
+    let body = serde_json::to_string(&json!({ "error": message })).unwrap_or_default();
+    Response::builder()
+        .status(code)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::from("")))
+}
+
+/// Forward an upstream reqwest response (status + headers + body) to the
+/// axum caller. Streams the body byte-for-byte so SSE works without
+/// re-framing.
+fn forward_streaming_response(upstream: reqwest::Response) -> Response {
+    let status = upstream.status();
+    let mut builder = Response::builder().status(status);
+    let pass_through = [
+        "content-type",
+        "cache-control",
+        "anthropic-request-id",
+        "mcp-session-id",
+    ];
+    for &name in &pass_through {
+        if let Some(v) = upstream.headers().get(name) {
+            builder = builder.header(name, v);
+        }
+    }
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string())));
+    builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
+    })
+}

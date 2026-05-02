@@ -1,5 +1,80 @@
 # Changelog
 
+## v1.5.0 — 2026-05-01
+
+### Chat: Anthropic Claude alongside the local WebLLM models
+
+The chat picker now has two groups:
+
+- **Anthropic API** — Claude Opus 4.7, Sonnet 4.6, Haiku 4.5. Streamed
+  through a server-side proxy at `/api/anthropic/messages`. The API key
+  lives at `<vault>/anthropic.toml` (chmod 0600 on Unix); satchel
+  attaches the `x-api-key` + `anthropic-version` headers and pipes the
+  SSE response straight to the browser. The browser never sees the key.
+- **Local · WebLLM** — same curated list as before (Llama 3.2 1B/3B,
+  Hermes 3, Qwen 2.5 3B, Phi 3.5, Gemma 2, DeepSeek R1, …).
+
+The runLoop branches on backend. Claude turns use Anthropic's native
+tool-use protocol (`tools` + `tool_use` blocks) instead of XGrammar
+constrained decoding; tool calls dispatch to the same MCP, results come
+back as `tool_result` content blocks.
+
+UI cues for "you can configure Claude":
+- Engine-bar shows a `SET API KEY` button instead of LOAD when an
+  Anthropic model is selected with no key saved.
+- Selected-model note carries an `Anthropic API` badge.
+- Settings modal has a new **ANTHROPIC API** section: paste key, save
+  / replace / clear, plus a `console.anthropic.com → Settings → Keys`
+  link.
+
+### External MCP servers — settings UI + server-side proxy
+
+Beyond satchel's own built-in MCP at `/mcp`, users can now wire up any
+JSON-RPC MCP server (GitHub MCP, filesystem MCP, anything that speaks
+the protocol). Configuration UI lives in the same gear modal — a new
+**MCP SERVERS** section with a list + ADD form.
+
+Auth headers (Bearer tokens, X-API-Keys, etc.) are stored at
+`<vault>/mcp.toml` (chmod 0600) and never leave the server side. Browser
+traffic forwards through `/api/mcp/proxy/<id>` so the headers attach
+server-side.
+
+The built-in satchel MCP renders at the top of the list, locked, marked
+"can't be removed" — exactly as you'd expect.
+
+Endpoints:
+- `GET /api/mcp/servers` → `[{id, name, url, has_auth}]` (no headers)
+- `POST /api/mcp/servers` → upsert
+- `DELETE /api/mcp/servers/:id` → remove
+- `POST /api/mcp/proxy/:id` → forwards JSON-RPC body to the configured
+  upstream with stored headers; pipes response (including SSE) back
+
+(Aggregating tools across multiple connected MCPs in the chat agent
+loop is a v1.5.x follow-up — the management surface ships now so the
+UX bar lands; the cross-server tool aggregation comes next.)
+
+### Library bits
+
+- `src/anthropic/mod.rs` — `AnthropicConfig` (load/save/clear at
+  `<vault>/anthropic.toml`), `proxy_messages()` opening a streaming
+  POST against `https://api.anthropic.com/v1/messages` with the right
+  headers. Uses `reqwest` (rustls-tls, stream, json) + `futures-util`
+  for the byte-stream forwarder.
+- `src/mcp_proxy/mod.rs` — `McpServersConfig` with `upsert` / `remove`
+  / `find`, id validation (URL-safe slugs only), `proxy_call()`.
+- `src/server.rs` — the four new endpoint families plus a generic
+  `forward_streaming_response()` helper that copies status, the
+  whitelist of pass-through headers (`content-type`, `cache-control`,
+  `anthropic-request-id`, `mcp-session-id`), and streams the body
+  through with `Body::from_stream`.
+- 7 new tests covering both configs (roundtrip + blank-treated-as-unset
+  + MCP id validation + remove + upsert-by-id-replaces).
+
+145 cargo tests passing. Verified end-to-end: save fake Anthropic key →
+status flips to `API key saved`; add MCP server → appears in list with
+the built-in `satchel` entry above it; underlying files written with
+0600 permissions.
+
 ## v1.4.0 — 2026-05-01
 
 ### Chat layout: engine bar on top, no rail

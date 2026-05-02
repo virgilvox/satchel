@@ -1,8 +1,20 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import Dot from './Dot.svelte';
   import { chatSettings, type ContextSize, type SlidingSize } from '../lib/stores.svelte';
   import type { McpTool } from '../lib/types';
+  import {
+    getAnthropicConfigured,
+    setAnthropicKey,
+    clearAnthropicKey,
+  } from '../lib/anthropic';
+  import {
+    listMcpServers,
+    upsertMcpServer,
+    deleteMcpServer,
+    type McpServerSummary,
+  } from '../lib/mcpServers';
 
   type McpStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -50,6 +62,100 @@
   function fmt(v: number, digits = 2): string {
     return v.toFixed(digits).replace(/\.?0+$/, '');
   }
+
+  // ─── Anthropic API key ───────────────────────────────────────────────
+  let anthropicConfigured = $state(false);
+  let anthropicKey = $state(''); // form field; never round-tripped from server
+  let anthropicSaving = $state(false);
+  let anthropicError: string | undefined = $state(undefined);
+
+  async function refreshAnthropic() {
+    anthropicConfigured = await getAnthropicConfigured();
+  }
+  async function saveAnthropic() {
+    if (anthropicSaving || !anthropicKey.trim()) return;
+    anthropicSaving = true;
+    anthropicError = undefined;
+    const r = await setAnthropicKey(anthropicKey.trim());
+    if (r.error) anthropicError = r.error;
+    if (r.ok) anthropicKey = '';
+    await refreshAnthropic();
+    anthropicSaving = false;
+  }
+  async function clearAnthropic() {
+    if (anthropicSaving) return;
+    anthropicSaving = true;
+    await clearAnthropicKey();
+    anthropicKey = '';
+    await refreshAnthropic();
+    anthropicSaving = false;
+  }
+
+  // ─── MCP servers (external) ──────────────────────────────────────────
+  let mcpServers = $state<McpServerSummary[]>([]);
+  let mcpEditing = $state(false);
+  let mcpForm = $state({
+    id: '',
+    name: '',
+    url: '',
+    authHeader: 'Authorization',
+    authValue: '',
+  });
+  let mcpServerError: string | undefined = $state(undefined);
+
+  async function refreshMcpServers() {
+    try {
+      mcpServers = await listMcpServers();
+    } catch (e) {
+      mcpServerError = (e as Error).message;
+    }
+  }
+  function startAddMcp() {
+    mcpForm = { id: '', name: '', url: '', authHeader: 'Authorization', authValue: '' };
+    mcpEditing = true;
+    mcpServerError = undefined;
+  }
+  async function saveMcp() {
+    mcpServerError = undefined;
+    try {
+      const headers: Record<string, string> = {};
+      if (mcpForm.authHeader.trim() && mcpForm.authValue.trim()) {
+        headers[mcpForm.authHeader.trim()] = mcpForm.authValue.trim();
+      }
+      await upsertMcpServer({
+        id: mcpForm.id.trim(),
+        name: mcpForm.name.trim() || mcpForm.id.trim(),
+        url: mcpForm.url.trim(),
+        headers: Object.keys(headers).length ? headers : undefined,
+      });
+      mcpEditing = false;
+      await refreshMcpServers();
+    } catch (e) {
+      mcpServerError = (e as Error).message;
+    }
+  }
+  async function removeMcp(id: string) {
+    if (!confirm(`Remove MCP server "${id}"?`)) return;
+    try {
+      await deleteMcpServer(id);
+      await refreshMcpServers();
+    } catch (e) {
+      mcpServerError = (e as Error).message;
+    }
+  }
+
+  // Refresh both panels each time the modal opens. Otherwise stale data
+  // sits on screen between sessions.
+  $effect(() => {
+    if (open) {
+      refreshAnthropic();
+      refreshMcpServers();
+    }
+  });
+  onMount(() => {
+    refreshAnthropic();
+    refreshMcpServers();
+  });
 </script>
 
 <Modal {open} title="CHAT SETTINGS" {onClose}>
@@ -198,6 +304,99 @@
       </div>
     {/if}
 
+    <!-- ============ Anthropic API ============ -->
+    <div class="section-label">ANTHROPIC API</div>
+    <p class="desc">
+      Use Claude (Opus / Sonnet / Haiku) in the Chat tab. The API key is
+      stored at <code>&lt;vault&gt;/anthropic.toml</code> with 0600 permissions; it
+      never leaves the server side after save. Chat traffic is proxied
+      through <code>/api/anthropic/messages</code> so the key stays out of the
+      browser.
+    </p>
+    <div class="row anthropic-status">
+      <Dot tone={anthropicConfigured ? 'teal' : 'dim'} />
+      <span class="name">{anthropicConfigured ? 'API key saved' : 'No API key configured'}</span>
+      {#if anthropicConfigured}
+        <button class="btn btn-secondary btn-sm" type="button"
+          onclick={clearAnthropic} disabled={anthropicSaving}>CLEAR</button>
+      {/if}
+    </div>
+    <input type="password" class="select" placeholder="sk-ant-…" autocomplete="off"
+      bind:value={anthropicKey} />
+    <div class="btn-row">
+      <button class="btn btn-primary btn-sm" type="button"
+        onclick={saveAnthropic}
+        disabled={anthropicSaving || !anthropicKey.trim()}>
+        {anthropicSaving ? 'SAVING…' : (anthropicConfigured ? 'REPLACE KEY' : 'SAVE KEY')}
+      </button>
+      <a class="link" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">get a key →</a>
+    </div>
+    {#if anthropicError}<p class="err">{anthropicError}</p>{/if}
+
+    <!-- ============ External MCP servers ============ -->
+    <div class="section-label">MCP SERVERS</div>
+    <p class="desc">
+      Wire up MCP servers other than satchel's own (GitHub MCP, filesystem
+      MCP, anything that speaks the protocol). Auth headers are stored at
+      <code>&lt;vault&gt;/mcp.toml</code> (0600) — the browser never sees them.
+      Traffic forwards through <code>/api/mcp/proxy/&lt;id&gt;</code>.
+    </p>
+    <div class="row builtin-mcp">
+      <Dot tone="teal" />
+      <span class="name">satchel</span>
+      <span class="desc-inline">always-on, your local vault — can't be removed</span>
+    </div>
+    {#each mcpServers as s (s.id)}
+      <div class="row">
+        <Dot tone={s.has_auth ? 'amber' : 'dim'} />
+        <span class="name">{s.name}</span>
+        <span class="desc-inline">{s.url}</span>
+        <button class="btn btn-secondary btn-sm" type="button" onclick={() => removeMcp(s.id)}>REMOVE</button>
+      </div>
+    {/each}
+    {#if mcpEditing}
+      <div class="form">
+        <label class="field">
+          <span class="field-label">id (URL-safe slug)</span>
+          <input type="text" class="select" placeholder="github" bind:value={mcpForm.id}
+            autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span class="field-label">label</span>
+          <input type="text" class="select" placeholder="GitHub MCP" bind:value={mcpForm.name}
+            autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">URL</span>
+          <input type="text" class="select" placeholder="https://example.com/mcp"
+            bind:value={mcpForm.url} autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="auth-row">
+          <label class="field grow">
+            <span class="field-label">auth header (optional)</span>
+            <input type="text" class="select" placeholder="Authorization"
+              bind:value={mcpForm.authHeader} autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field grow">
+            <span class="field-label">value</span>
+            <input type="password" class="select" placeholder="Bearer …"
+              bind:value={mcpForm.authValue} autocomplete="off" />
+          </label>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-primary btn-sm" type="button" onclick={saveMcp}
+            disabled={!mcpForm.id.trim() || !mcpForm.url.trim()}>SAVE</button>
+          <button class="btn btn-secondary btn-sm" type="button"
+            onclick={() => (mcpEditing = false)}>CANCEL</button>
+        </div>
+      </div>
+    {:else}
+      <div class="btn-row">
+        <button class="btn btn-secondary btn-sm" type="button" onclick={startAddMcp}>+ ADD MCP SERVER</button>
+      </div>
+    {/if}
+    {#if mcpServerError}<p class="err">{mcpServerError}</p>{/if}
+
     <!-- ============ Persistence ============ -->
     <div class="section-label">PERSISTENCE</div>
 
@@ -289,6 +488,60 @@
   }
   .tname { color: var(--teal); font-weight: 700; font-size: 11px; }
   .tdesc { color: var(--text-dim); font-size: 10px; line-height: 1.5; margin-top: 3px; }
+
+  /* Anthropic + MCP-server rows live in the same modal sections; share styling. */
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+  }
+  .row .name { font-size: 11px; color: var(--text); font-weight: 700; }
+  .row .desc-inline {
+    color: var(--text-dim);
+    font-size: 10px;
+    flex: 1;
+    min-width: 0;
+    word-break: break-all;
+  }
+  .row.builtin-mcp { border-color: var(--teal); }
+  .anthropic-status .name { font-weight: 500; flex: 1; }
+
+  .form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    padding: 12px;
+  }
+  .auth-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .auth-row .grow { flex: 1; min-width: 180px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field-label {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  .err { color: var(--danger); font-size: 11px; margin: 0; }
+  .link {
+    color: var(--teal);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    text-decoration: none;
+    border-bottom: 1px dotted var(--teal-soft);
+  }
+  .link:hover { border-bottom-style: solid; }
 
   .row { display: flex; flex-direction: column; gap: 6px; }
   .row.disabled { opacity: 0.5; }

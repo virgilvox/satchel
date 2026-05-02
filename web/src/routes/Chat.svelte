@@ -9,7 +9,6 @@
   import StatusLine from '../components/StatusLine.svelte';
   import SettingsModal from '../components/SettingsModal.svelte';
   import {
-    MODELS,
     checkSupport,
     createEngine,
     type EngineHandle,
@@ -24,6 +23,19 @@
   import { McpClient } from '../lib/mcp';
   import { settings, chatSettings } from '../lib/stores.svelte';
   import type { ChatMessage, McpTool, ToolCallResult } from '../lib/types';
+  import {
+    CHAT_MODELS,
+    findChatModel,
+    groupedChatModels,
+    type ChatModel,
+  } from '../lib/chatModels';
+  import {
+    streamAnthropicTurn,
+    getAnthropicConfigured,
+    type AnthropicMessage,
+    type AnthropicTool,
+    type AnthropicContentBlock,
+  } from '../lib/anthropic';
 
   const TRANSCRIPT_KEY = 'satchel-chat-transcript';
 
@@ -33,6 +45,12 @@
   let loading = $state(false);
   let progress = $state<InitProgress>({ text: '', progress: 0, timeElapsed: 0 });
   let loadError = $state<string | undefined>();
+  // Tracks which backend is "live". Set by loadModel(); cleared by unloadModel().
+  // For 'webllm' we additionally hold an EngineHandle in `engine`; for
+  // 'anthropic' we don't have an engine, just an attestation that the API
+  // key is configured.
+  let liveBackend = $state<'webllm' | 'anthropic' | null>(null);
+  let anthropicConfigured = $state(false);
 
   // ---- MCP state ----
   let mcp = new McpClient(settings.mcpEndpoint);
@@ -66,6 +84,26 @@
   $effect(() => {
     if (mcpStatus === 'idle') connectMcp();
   });
+
+  // Poll the Anthropic-config status so the UI can disable LOAD on Claude
+  // models when the user hasn't saved an API key yet, and recover when
+  // they save one without re-loading the page.
+  $effect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const ok = await getAnthropicConfigured();
+      if (!cancelled) anthropicConfigured = ok;
+    };
+    tick();
+    const t = window.setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  });
+
+  let selectedModel = $derived(findChatModel(settings.chatModel) ?? CHAT_MODELS[0]);
+  let selectedBackend = $derived(selectedModel?.backend ?? 'webllm');
 
   // Restore the transcript from localStorage on mount (one-shot).
   // Only happens when persist_history is on.
@@ -115,9 +153,33 @@
   });
 
   async function loadModel() {
-    if (loading || !support?.supported) return;
-    loading = true;
+    if (loading) return;
     loadError = undefined;
+    const m = selectedModel;
+    if (!m) return;
+
+    if (m.backend === 'anthropic') {
+      // No engine to spin up — just attest that the API key is saved.
+      // The chat path streams through `/api/anthropic/messages` per turn.
+      const ok = await getAnthropicConfigured();
+      anthropicConfigured = ok;
+      if (!ok) {
+        loadError =
+          "Anthropic API key not configured. Open ⚙ Settings → Anthropic API to add one.";
+        return;
+      }
+      liveBackend = 'anthropic';
+      // Fake a synthetic context window for the indicator. Anthropic's
+      // models don't expose live token counts via the SSE stream's usage
+      // event reliably; the indicator stays at 0% during use.
+      lastUsage = { prompt: 0, total: 0, window: 200000 };
+      contextFull = false;
+      return;
+    }
+
+    // WebLLM path (unchanged from v1.4.x).
+    if (!support?.supported) return;
+    loading = true;
     progress = { text: 'starting...', progress: 0, timeElapsed: 0 };
     try {
       const ctx =
@@ -128,32 +190,30 @@
         chatSettings.slidingWindowSize !== 'off'
           ? Number(chatSettings.slidingWindowSize)
           : undefined;
-      engine = await createEngine(
-        settings.chatModel,
-        (p) => (progress = p),
-        { contextWindowSize: ctx, slidingWindowSize: sliding }
-      );
-      // Capture the live context-window size for the in-chat indicator.
-      // We use the override if the user picked one, else fall back to the
-      // model's compiled default which we don't know precisely without
-      // poking WebLLM internals — 4096 is the safe lower bound used by
-      // most q4f16_1 builds.
+      engine = await createEngine(m.id, (p) => (progress = p), {
+        contextWindowSize: ctx,
+        slidingWindowSize: sliding,
+      });
+      liveBackend = 'webllm';
       lastUsage = { prompt: 0, total: 0, window: ctx ?? 4096 };
       contextFull = false;
     } catch (e) {
       loadError = (e as Error).message;
       engine = null;
+      liveBackend = null;
     } finally {
       loading = false;
     }
   }
 
   async function unloadModel() {
-    if (!engine) return;
-    try {
-      await engine.unload();
-    } catch {}
-    engine = null;
+    if (engine) {
+      try {
+        await engine.unload();
+      } catch {}
+      engine = null;
+    }
+    liveBackend = null;
     progress = { text: '', progress: 0, timeElapsed: 0 };
   }
 
@@ -176,7 +236,7 @@
   }
 
   async function send(text: string) {
-    if (busy || !engine) return;
+    if (busy || !liveBackend) return;
     busy = true;
     abortFlag = false;
     useLooseSchema = false;
@@ -186,7 +246,11 @@
     scrollToBottom();
 
     try {
-      await runLoop();
+      if (liveBackend === 'anthropic') {
+        await runAnthropicLoop();
+      } else {
+        await runLoop();
+      }
     } catch (e) {
       transcript = [
         ...transcript,
@@ -473,9 +537,210 @@
     return out;
   }
 
+  // ───────────────────────────────────────────────────────────────────
+  // Anthropic agent loop. Mirrors runLoop() but uses Claude's native
+  // tool-use protocol (no constrained-decoding schema needed — Anthropic
+  // models are reliably trained on `tools=` + `tool_use` content blocks).
+  //
+  //   1. Build Anthropic-format messages from transcript
+  //   2. Stream a turn through `/api/anthropic/messages`
+  //   3. If the response has tool_use blocks: dispatch each via MCP,
+  //      append a tool_result content block, loop
+  //   4. Otherwise: render the final text answer, exit
+  // ───────────────────────────────────────────────────────────────────
+  async function runAnthropicLoop(): Promise<void> {
+    const m = selectedModel;
+    if (!m || m.backend !== 'anthropic') return;
+
+    const systemPrompt = buildAnthropicSystemPrompt();
+    const anthropicTools: AnthropicTool[] = tools.map((t) => ({
+      name: t.name,
+      description: t.description ?? '',
+      input_schema: (t.inputSchema as Record<string, unknown>) ?? {
+        type: 'object',
+        properties: {},
+      },
+    }));
+
+    while (round < chatSettings.maxRounds && !abortFlag) {
+      round += 1;
+      const aId = crypto.randomUUID();
+      transcript = [
+        ...transcript,
+        { id: aId, role: 'assistant', content: '', streaming: true },
+      ];
+      scrollToBottom();
+
+      const messages = buildAnthropicMessages();
+      let result;
+      try {
+        result = await streamAnthropicTurn(
+          {
+            model: m.id,
+            messages,
+            tools: anthropicTools.length ? anthropicTools : undefined,
+            system: systemPrompt,
+            max_tokens: chatSettings.maxTokens,
+            temperature: chatSettings.temperature,
+          },
+          (delta) => {
+            transcript = transcript.map((m2) =>
+              m2.id !== aId ? m2 : { ...m2, content: (m2.content ?? '') + delta }
+            );
+          },
+        );
+      } catch (e) {
+        const msg = (e as Error).message;
+        transcript = transcript.map((m2) =>
+          m2.id !== aId
+            ? m2
+            : { ...m2, role: 'error' as const, streaming: false, content: msg }
+        );
+        return;
+      }
+
+      if (result.error) {
+        transcript = transcript.map((m2) =>
+          m2.id !== aId
+            ? m2
+            : { ...m2, role: 'error' as const, streaming: false, content: result.error! }
+        );
+        return;
+      }
+
+      // No tool calls? Final answer — finalize and exit.
+      if (result.toolUses.length === 0) {
+        transcript = transcript.map((m2) =>
+          m2.id !== aId
+            ? m2
+            : { ...m2, streaming: false, content: result.text || m2.content || '' }
+        );
+        return;
+      }
+
+      // Tool calls: render them on the assistant turn, dispatch, loop.
+      const calls: ToolCallResult[] = result.toolUses.map((tu) => ({
+        id: tu.id,
+        name: tu.name,
+        args: tu.input,
+        pending: true,
+      }));
+      transcript = transcript.map((m2) =>
+        m2.id !== aId
+          ? m2
+          : {
+              ...m2,
+              streaming: false,
+              content: result.text,
+              toolCalls: calls,
+            }
+      );
+      scrollToBottom();
+
+      for (const tu of result.toolUses) {
+        try {
+          const out = await mcp.callTool(tu.name, tu.input);
+          transcript = transcript.map((m2) =>
+            m2.id !== aId || !m2.toolCalls
+              ? m2
+              : {
+                  ...m2,
+                  toolCalls: m2.toolCalls.map((c) =>
+                    c.id === tu.id ? { ...c, pending: false, result: out } : c
+                  ),
+                }
+          );
+        } catch (e) {
+          const errMsg = (e as Error).message;
+          transcript = transcript.map((m2) =>
+            m2.id !== aId || !m2.toolCalls
+              ? m2
+              : {
+                  ...m2,
+                  toolCalls: m2.toolCalls.map((c) =>
+                    c.id === tu.id ? { ...c, pending: false, error: errMsg } : c
+                  ),
+                }
+          );
+        }
+      }
+      scrollToBottom();
+      // Loop body continues, builds next message list including the
+      // tool_result blocks.
+    }
+
+    if (round >= chatSettings.maxRounds) {
+      transcript = [
+        ...transcript,
+        {
+          id: crypto.randomUUID(),
+          role: 'error',
+          content: `Hit max_rounds (${chatSettings.maxRounds}). The model didn't reach a final answer.`,
+        },
+      ];
+    }
+  }
+
+  function buildAnthropicSystemPrompt(): string {
+    return `You are SATCHEL, an assistant grounded in the user's local knowledge vault. The user's data is in the tools below; never invent sources. Cite source paths in your answers. Keep answers concise.`;
+  }
+
+  /** Translate the satchel transcript to Anthropic's `messages` shape.
+   *  - User turns → `{role: 'user', content: text}`
+   *  - Assistant turns with tool calls → assistant message containing
+   *    text + tool_use blocks; followed by a user message with
+   *    tool_result blocks (one per call).
+   *  - Plain assistant final-answer turns → assistant message with text. */
+  function buildAnthropicMessages(): AnthropicMessage[] {
+    const out: AnthropicMessage[] = [];
+    for (const m of transcript) {
+      if (m.streaming) continue; // skip in-flight placeholder
+      if (m.role === 'user') {
+        out.push({ role: 'user', content: m.content });
+        continue;
+      }
+      if (m.role === 'assistant') {
+        const content: AnthropicContentBlock[] = [];
+        if (m.content) content.push({ type: 'text', text: m.content });
+        if (m.toolCalls?.length) {
+          for (const tc of m.toolCalls) {
+            content.push({
+              type: 'tool_use',
+              id: tc.id,
+              name: tc.name,
+              input: tc.args,
+            });
+          }
+        }
+        if (content.length) {
+          out.push({ role: 'assistant', content });
+        }
+        if (m.toolCalls?.length) {
+          // tool_result blocks live on a USER message in Anthropic's
+          // protocol, immediately following the assistant's tool_use.
+          const results: AnthropicContentBlock[] = m.toolCalls
+            .filter((tc) => !tc.pending)
+            .map((tc) => ({
+              // tool_result is a valid Anthropic content-block type; our
+              // narrow union doesn't include it (the typed API for this
+              // module is request-shape, not response-shape). Plain
+              // object → JSON, double-cast through `unknown` because TS
+              // won't accept a one-step cast here.
+              type: 'tool_result',
+              tool_use_id: tc.id,
+              content: tc.error ? `Error: ${tc.error}` : tc.result ?? '',
+              is_error: !!tc.error,
+            } as unknown as AnthropicContentBlock));
+          if (results.length) out.push({ role: 'user', content: results });
+        }
+      }
+    }
+    return out;
+  }
+
   let progressPct = $derived(Math.round((progress.progress || 0) * 100));
-  let modelInfo = $derived(MODELS.find((m) => m.id === settings.chatModel));
-  let canSend = $derived(!!engine && !busy);
+  let modelInfo = $derived(selectedModel);
+  let canSend = $derived(!!liveBackend && !busy);
 
   // Context-fill indicator: turns amber > 80%, danger > 95%.
   let ctxPct = $derived.by(() => {
@@ -498,7 +763,7 @@
      window stays as roomy as possible. -->
 <div class="strip">
   <div class="strip-left">
-    {#if engine}
+    {#if liveBackend}
       <Pill tone="teal"><Dot tone="teal" /><span class="pill-text">{modelInfo?.label ?? 'model'}</span></Pill>
     {:else if loading}
       <Pill tone="amber"><Dot tone="amber" pulse /><span class="pill-text">loading {progressPct}%</span></Pill>
@@ -515,7 +780,7 @@
     {#if busy}
       <Pill tone="amber"><Dot tone="amber" pulse /><span class="pill-text">round {round}/{chatSettings.maxRounds}</span></Pill>
     {/if}
-    {#if engine && lastUsage.total > 0}
+    {#if liveBackend && lastUsage.total > 0}
       <Pill tone={ctxTone}>
         <Dot tone={ctxTone} />
         <span class="pill-text">ctx {ctxPct}% · {lastUsage.total}t</span>
@@ -542,28 +807,46 @@
 {/if}
 
 <!-- ───────── Engine bar · model picker + LOAD/UNLOAD ─────────
-     Inline above the chat instead of off in a sidebar. When no model is
-     loaded the picker + LOAD button are visible. Once an engine is hot
-     the bar shrinks to a one-line "ready" affordance with UNLOAD. -->
-<div class="engine-bar" class:hot={!!engine}>
-  {#if !engine}
+     Inline above the chat instead of off in a sidebar. When no engine is
+     "live" (WebLLM or Anthropic) the picker + LOAD button are visible.
+     Once a model is hot the bar shrinks to a one-line "ready"
+     affordance with UNLOAD. -->
+<div class="engine-bar" class:hot={!!liveBackend}>
+  {#if !liveBackend}
     <select class="select model-select" bind:value={settings.chatModel}
       disabled={loading} onchange={() => settings.setModel(settings.chatModel)}>
-      {#each MODELS as m (m.id)}
-        <option value={m.id}>{m.label} · {m.size}</option>
+      {#each groupedChatModels() as g (g.name)}
+        <optgroup label={g.name}>
+          {#each g.items as m (m.id)}
+            <option value={m.id}>{m.label} · {m.size}</option>
+          {/each}
+        </optgroup>
       {/each}
     </select>
-    <button class="btn btn-primary btn-sm" type="button" onclick={loadModel}
-      disabled={loading || !support?.supported}>
-      {loading ? `LOADING ${progressPct}%` : 'LOAD'}
-    </button>
-    {#if modelInfo?.notes}
-      <p class="model-note">{modelInfo.notes}</p>
+    {#if selectedBackend === 'anthropic' && !anthropicConfigured}
+      <button class="btn btn-secondary btn-sm" type="button"
+        onclick={() => (settingsOpen = true)}>SET API KEY</button>
+    {:else}
+      <button class="btn btn-primary btn-sm" type="button" onclick={loadModel}
+        disabled={loading || (selectedBackend === 'webllm' && !support?.supported)}>
+        {loading ? `LOADING ${progressPct}%` : 'LOAD'}
+      </button>
+    {/if}
+    {#if selectedModel?.notes}
+      <p class="model-note">
+        {#if selectedBackend === 'anthropic'}
+          <span class="badge-anthropic">Anthropic API</span>
+        {/if}
+        {selectedModel.notes}
+      </p>
     {/if}
   {:else}
     <div class="engine-ready">
       <Dot tone="teal" />
-      <span class="ready-text">{settings.chatModel}</span>
+      <span class="ready-text">
+        {selectedModel?.label ?? settings.chatModel}
+        {#if liveBackend === 'anthropic'}<span class="ready-suffix">· Anthropic API</span>{/if}
+      </span>
     </div>
     <button class="btn btn-secondary btn-sm" type="button" onclick={unloadModel}>UNLOAD</button>
   {/if}
@@ -588,7 +871,7 @@
         <Mark size={72} strong />
         <h3>BROWSER LLM · LOCAL MCP</h3>
         <p>A small model runs in this browser via WebGPU. Tool calls go straight to the local MCP server. Nothing leaves your machine.</p>
-        {#if !engine && !loading}
+        {#if !liveBackend && !loading}
           <p class="hint">
             <kbd>1.</kbd> pick a model above + LOAD ·
             <kbd>2.</kbd> wait for MCP to show <strong>connected</strong> ·
@@ -597,7 +880,13 @@
         {/if}
         <p class="hint mode">
           <span class="glyph">⚒</span>
-          <span>Output is constrained by an XGrammar logit mask — the model literally cannot emit invalid JSON or hallucinate tool names. Works with every model in the list, not just the Hermes whitelist.</span>
+          <span>
+            Two backends in one picker. <strong>Local · WebLLM</strong> models run
+            entirely in your browser via WebGPU; output is locked to a per-tool JSON
+            schema by an XGrammar logit mask. <strong>Anthropic API</strong> models
+            (Claude Opus / Sonnet / Haiku) stream through this satchel's server-side
+            proxy using your saved API key. Tool calls go to the same MCP either way.
+          </span>
         </p>
       </div>
     {:else}
@@ -607,7 +896,7 @@
     {/if}
   </div>
   <Composer onSend={send} onCancel={cancel} {busy}
-    placeholder={engine ? 'message... (enter to send, shift+enter newline)' : 'load a model first...'}
+    placeholder={liveBackend ? 'message... (enter to send, shift+enter newline)' : 'load a model first...'}
     disabled={!canSend && !busy} />
 </div>
 
@@ -625,7 +914,7 @@
 <SettingsModal
   open={settingsOpen}
   onClose={() => (settingsOpen = false)}
-  engineLoaded={!!engine}
+  engineLoaded={!!liveBackend}
   mcpEndpoint={settings.mcpEndpoint}
   {mcpStatus}
   {mcpError}
@@ -767,6 +1056,26 @@
     font-weight: 700;
   }
   .ready-text { color: var(--text); font-weight: 500; word-break: break-all; }
+  .ready-suffix {
+    color: var(--text-dim);
+    font-weight: 400;
+    margin-left: 8px;
+    letter-spacing: 1.5px;
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+  .badge-anthropic {
+    display: inline-block;
+    color: var(--amber);
+    background: var(--amber-soft);
+    border: 1px solid var(--amber-line);
+    padding: 1px 7px;
+    margin-right: 8px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
 
   .prog { margin-bottom: 14px; }
   .prog .bar { height: 3px; background: var(--border); overflow: hidden; }

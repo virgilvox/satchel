@@ -1,6 +1,6 @@
 [package]
 name = "satchel-rag"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "Portable RAG system on a USB drive. Single binary, local embeddings, MCP protocol."
 license = "AGPL-3.0-only"
@@ -78,6 +78,12 @@ regex = "1"
 # don't pull in the writer (`toml::to_string`) since we hand-format on save —
 # the parse side is what matters.
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+
+# Anthropic API + external MCP proxy (v1.5.0). Pure rustls to keep the
+# Linux musl story alive — no openssl, no system TLS. `stream` for SSE
+# response bodies; `json` for typed request bodies.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [features]
 default = []

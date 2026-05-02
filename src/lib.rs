@@ -1,7 +1,9 @@
+pub mod anthropic;
 pub mod embed;
 pub mod ingest;
 pub mod jobs;
 pub mod mcp;
+pub mod mcp_proxy;
 pub mod rag;
 pub mod server;
 pub mod tunnel;
