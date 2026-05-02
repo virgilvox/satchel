@@ -5,6 +5,7 @@ pub mod jobs;
 pub mod mcp;
 pub mod mcp_proxy;
 pub mod rag;
+pub mod release;
 pub mod server;
 pub mod tunnel;
 pub mod vault;

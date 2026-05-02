@@ -1,11 +1,29 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import StatCard from '../components/StatCard.svelte';
   import SearchBox from '../components/SearchBox.svelte';
   import ResultList from '../components/ResultList.svelte';
   import ViewHead from '../components/ViewHead.svelte';
-  import { api } from '../lib/api';
+  import { api, type ReleaseInfo } from '../lib/api';
   import { status } from '../lib/stores.svelte';
   import type { SearchResult } from '../lib/types';
+
+  // Release probe — populated on mount via /api/release. Server caches
+  // for an hour so the call is cheap. We never block render on it.
+  let release = $state<ReleaseInfo | null>(null);
+  let releaseChecking = $state(false);
+  async function loadRelease(refresh = false) {
+    if (releaseChecking) return;
+    releaseChecking = true;
+    try {
+      release = await api.release(refresh);
+    } catch {
+      // network error swallowed — banner just won't show
+    } finally {
+      releaseChecking = false;
+    }
+  }
+  onMount(() => loadRelease(false));
 
   let q = $state('');
   let results = $state<SearchResult[]>([]);
@@ -79,11 +97,30 @@
 <ViewHead num="01" title={`DASHBOARD <span class="slash">/</span> VAULT AT A GLANCE`}
   desc="Counts, quick search, and a status check for your portable knowledge corpus." />
 
+{#if release?.update_available && release.release_url}
+  <a class="update-banner" href={release.release_url} target="_blank" rel="noopener">
+    <span class="up-label">UPDATE AVAILABLE</span>
+    <span class="up-vers">v{release.current} → v{release.latest}</span>
+    <span class="up-hint">view release notes ↗</span>
+  </a>
+{/if}
+
 {#if vault?.path}
   <div class="vault-strip">
     <span class="vault-label">ACTIVE VAULT</span>
     <span class="vault-name">{vault.name ?? 'default'}</span>
     <span class="vault-path" title={vault.path}>{vault.path}</span>
+    <button class="up-check" type="button" onclick={() => loadRelease(true)}
+      disabled={releaseChecking || release?.disabled}
+      title={release?.disabled
+        ? 'Update checks disabled via SATCHEL_DISABLE_UPDATE_CHECK'
+        : release?.error
+          ? `Last check: ${release.error}`
+          : release?.checked_at
+            ? `Last checked ${release.checked_at}`
+            : 'Check GitHub for a newer release'}>
+      {#if releaseChecking}CHECKING…{:else if release?.disabled}UPDATES OFF{:else if release?.update_available}v{release.latest} READY{:else if release?.latest}UP TO DATE{:else}CHECK FOR UPDATES{/if}
+    </button>
   </div>
 {/if}
 
@@ -140,6 +177,47 @@
   .results {
     margin-top: 14px;
   }
+
+  .update-banner {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--teal);
+    background: var(--teal-soft);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 11px;
+    transition: 120ms ease;
+  }
+  .update-banner:hover { background: var(--teal-soft); border-color: var(--teal-deep, var(--teal)); }
+  .update-banner .up-label {
+    color: var(--teal); font-weight: 700;
+    letter-spacing: 2px; text-transform: uppercase;
+  }
+  .update-banner .up-vers {
+    color: var(--text-bright); font-weight: 700; letter-spacing: 1px;
+    font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  }
+  .update-banner .up-hint { color: var(--teal); margin-left: auto; }
+
+  .up-check {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-weight: 700;
+    transition: 120ms ease;
+    margin-left: auto;
+  }
+  .up-check:hover:not(:disabled) {
+    color: var(--text-bright); border-color: var(--border-strong);
+  }
+  .up-check:disabled { opacity: 0.6; cursor: default; }
 
   .vault-strip {
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;

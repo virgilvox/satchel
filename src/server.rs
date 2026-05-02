@@ -16,6 +16,7 @@ use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::mcp_proxy::{self, McpServerEntry, McpServersConfig};
 use crate::rag::Database;
+use crate::release::ReleaseCache;
 use crate::tunnel::{TunnelConfig, TunnelManager, TunnelMode};
 use axum::body::Body;
 use axum::extract::Path as AxPath;
@@ -43,6 +44,9 @@ pub struct AppState {
     /// active vault path used for the DB; this is the parent that all
     /// vaults live under.
     pub vault_path: PathBuf,
+    /// Cached GitHub-release probe. One hour TTL — keeps GitHub
+    /// round-trips minimal even with several browser tabs open.
+    pub release_cache: ReleaseCache,
 }
 
 pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: PathBuf) -> Router {
@@ -53,12 +57,14 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
         tunnel: TunnelManager::new(),
         port,
         vault_path,
+        release_cache: ReleaseCache::default(),
     });
 
     Router::new()
         .route("/", get(ui_handler))
         .route("/mcp", post(mcp_handler))
         .route("/api/status", get(api_status))
+        .route("/api/release", get(api_release))
         .route("/api/sources", get(api_sources).delete(api_delete_sources))
         .route("/api/documents", get(api_documents))
         .route("/api/search", post(api_search))
@@ -250,6 +256,23 @@ async fn api_status(State(state): State<Arc<AppState>>) -> Json<Value> {
             "legacy_bases": legacy,
         },
     }))
+}
+
+#[derive(Deserialize, Default)]
+struct ReleaseQuery {
+    /// `?refresh=1` bypasses the in-memory cache. Used by the
+    /// "check now" button in the Dashboard so the user can see a fresh
+    /// answer without waiting for the TTL to expire.
+    #[serde(default)]
+    refresh: bool,
+}
+
+async fn api_release(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ReleaseQuery>,
+) -> Json<Value> {
+    let info = state.release_cache.get_or_fetch(q.refresh).await;
+    Json(serde_json::to_value(info).unwrap_or_else(|_| json!({})))
 }
 
 #[derive(Deserialize)]

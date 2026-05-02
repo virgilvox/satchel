@@ -57,8 +57,24 @@ function buildSourcesQS(params: {
   return qs.toString();
 }
 
+export interface ReleaseInfo {
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  published_at: string | null;
+  checked_at: string;
+  error: string | null;
+  disabled: boolean;
+}
+
 export const api = {
   status: () => getJson<StatusResponse>('/api/status'),
+
+  // GitHub-release probe. The server caches for an hour; pass
+  // `refresh=true` from the "check now" button to skip the cache.
+  release: (refresh = false) =>
+    getJson<ReleaseInfo>('/api/release' + (refresh ? '?refresh=1' : '')),
 
   search: (query: string, top_k = 20, offset = 0, collection_id?: number) =>
     postJson<SearchPage>('/api/search', {

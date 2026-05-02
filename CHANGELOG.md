@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.1.2 — 2026-05-02
+
+### Update checker
+
+The Dashboard now probes GitHub's `releases/latest` endpoint and shows
+a clickable banner when a newer version is available. Comparing
+`CARGO_PKG_VERSION` against the tag (with leading `v` stripped and
+pre-release / build suffixes ignored), the banner reads
+"UPDATE AVAILABLE · v2.1.2 → v2.2.0 · view release notes ↗" and
+links to the GitHub release page so the user can grab the new zip.
+
+A small status chip on the active-vault strip says `UP TO DATE` /
+`v2.2.0 READY` / `CHECK FOR UPDATES`. Clicking it forces a refresh
+(bypasses the cache) so users can verify after a known release.
+
+Server-side caching: one hour, process-wide. GitHub allows 60
+unauthenticated requests/hour per IP — well above what one running
+satchel can plausibly burn even with several open browser tabs. No
+auth token needed.
+
+Privacy: hitting `api.github.com` discloses to GitHub that someone
+is running SATCHEL. Set `SATCHEL_DISABLE_UPDATE_CHECK=1` in the env
+to opt out. The chip then reads `UPDATES OFF` and no network call
+fires.
+
+### `GET /api/release`
+
+```json
+{
+  "current": "2.1.2",
+  "latest": "2.2.0",
+  "update_available": true,
+  "release_url": "https://github.com/virgilvox/satchel/releases/tag/v2.2.0",
+  "published_at": "2026-05-09T...",
+  "checked_at": "2026-05-02T...",
+  "error": null,
+  "disabled": false
+}
+```
+
+`?refresh=1` bypasses the cache. `error` carries the network /
+parse / rate-limit reason on failure (in which case
+`update_available` stays false — never raise the flag on uncertain
+data).
+
+153 lib tests passing (5 new in `release::tests` covering the version
+comparator: basics, short versions, pre-release suffixes, garbage tags,
+and owner/repo extraction). 25 integration tests, all green.
+
 ## v2.1.1 — 2026-05-02
 
 ### Surface "you may be looking at the wrong vault" in the UI
