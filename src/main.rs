@@ -102,8 +102,7 @@ fn recall_vault_path() -> Option<PathBuf> {
     if trimmed.is_empty() {
         return None;
     }
-    let p = PathBuf::from(trimmed);
-    if p.exists() { Some(p) } else { None }
+    Some(PathBuf::from(trimmed)).filter(|p| p.exists())
 }
 
 /// Probe for a `vault/` directory deployed alongside the binary.

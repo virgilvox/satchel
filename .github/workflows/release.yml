@@ -19,6 +19,11 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # All matrix entries opt into the `prod` environment so the macOS
+    # builds can reach the Apple signing secrets stored there. Non-macOS
+    # runs simply don't reference those secrets; the env scoping does
+    # not block them.
+    environment: prod
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +123,48 @@ jobs:
           curl -sSL -o cloudflared "${CLOUDFLARED_BASE}/${CF}"
           chmod +x cloudflared
 
+      # Import the Apple Developer ID Application certificate into a
+      # temporary keychain on the macOS runner. Runs only when the
+      # signing secrets are present in the `prod` environment; on forks
+      # without these secrets, this step is a no-op and the build falls
+      # back to ad-hoc signing (still launchable locally with `xattr -dr
+      # com.apple.quarantine`, just not notarized).
+      - name: Import Apple signing certificate (macos)
+        if: |
+          (startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin'))
+          && secrets.APPLE_CERT_P12_BASE64 != ''
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          CERT_PATH="$RUNNER_TEMP/devid.p12"
+          echo "$APPLE_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          # Prepend the temp keychain to the user search list so codesign
+          # finds the identity. `tr -d '"'` strips quoting from the
+          # existing list output.
+          existing=$(security list-keychain -d user | tr -d '"' | xargs)
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $existing
+          # Discover the exact identity string for later steps.
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 \
+            | sed -E 's/.*"(Developer ID Application:[^"]+)".*/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::Developer ID Application identity not found in imported cert" >&2
+            exit 1
+          fi
+          echo "Found identity: $IDENTITY"
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          rm -f "$CERT_PATH"
+
       - name: Stage binary (macos · .app bundle)
         if: startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin')
         run: |
@@ -171,13 +218,23 @@ jobs:
           mv cloudflared "$APP/Contents/MacOS/cloudflared"
           chmod +x "$APP/Contents/MacOS/cloudflared"
           rm -f cloudflared.tgz
-          # Ad-hoc sign — codesign --deep covers nested binaries too, so
-          # the bundled cloudflared inherits a valid signature. Doesn't
-          # bypass Gatekeeper notarization (would need a paid Developer
-          # ID), but the bundle is launchable.
-          codesign --force --deep --sign - "$APP" || true
-          # Touch so Finder picks up the icon resource.
-          touch "$APP"
+          # Sign. Prefer Developer ID with the hardened runtime when the
+          # signing identity was imported in the previous step; this is
+          # the form Apple's notary service accepts. Sign nested binaries
+          # first (cloudflared) so the outer .app's seal covers an already
+          # valid inner signature, then sign the outer bundle. Fall back
+          # to ad-hoc when no identity is configured (e.g. forks).
+          if [ -n "${SIGNING_IDENTITY:-}" ]; then
+            echo "Signing with Developer ID: $SIGNING_IDENTITY"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGNING_IDENTITY" "$APP/Contents/MacOS/cloudflared"
+            codesign --force --options runtime --timestamp --deep \
+              --sign "$SIGNING_IDENTITY" "$APP"
+            codesign --verify --deep --strict --verbose=2 "$APP"
+          else
+            echo "No SIGNING_IDENTITY set; ad-hoc signing"
+            codesign --force --deep --sign - "$APP" || true
+          fi
 
       - name: Stage binary (windows)
         if: runner.os == 'Windows'
@@ -199,6 +256,47 @@ jobs:
           # ditto preserves bundle metadata + the .app's executable bit;
           # plain `zip` does not.
           ditto -c -k --keepParent --sequesterRsrc Satchel.app ${{ matrix.archive }}
+
+      # Submit the signed zip to Apple's notary service, wait for the
+      # ticket, staple it onto the .app, and re-zip so the staple
+      # travels in the artifact. Skipped when no signing identity was
+      # configured (the previous step did ad-hoc signing in that case
+      # and notarization would fail).
+      - name: Notarize macOS bundle
+        if: |
+          (startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin'))
+          && env.SIGNING_IDENTITY != ''
+          && secrets.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "Submitting ${{ matrix.archive }} to Apple notary service…"
+          xcrun notarytool submit "${{ matrix.archive }}" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+          # Staple modifies Satchel.app on disk; re-zip so the artifact
+          # carries the ticket and Gatekeeper can validate offline.
+          xcrun stapler staple Satchel.app
+          xcrun stapler validate Satchel.app
+          rm "${{ matrix.archive }}"
+          ditto -c -k --keepParent --sequesterRsrc Satchel.app "${{ matrix.archive }}"
+          echo "Notarized + stapled: ${{ matrix.archive }}"
+
+      # Tear down the temp keychain so credentials don't linger on the
+      # runner image (defensive; runners are ephemeral but this is good
+      # hygiene). Always runs after the macOS-signing path, even on
+      # earlier-step failure.
+      - name: Cleanup macOS keychain
+        if: |
+          always()
+          && (startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin'))
+          && env.KEYCHAIN_PATH != ''
+        run: security delete-keychain "$KEYCHAIN_PATH" || true
 
       - name: Package zip (windows)
         if: runner.os == 'Windows'

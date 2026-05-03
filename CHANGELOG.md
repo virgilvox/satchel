@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.3.3 — 2026-05-02
+
+### macOS releases are now Developer ID signed and notarized
+
+The release workflow now imports an Apple Developer ID Application
+certificate into a temporary keychain on the macOS runner, signs the
+.app and the bundled cloudflared with `--options runtime --timestamp`
+(hardened runtime, required for notarization), submits the zip to
+Apple's notary service, waits for the ticket, and staples the result
+back onto the bundle before re-zipping.
+
+End-user impact: a fresh download is no longer quarantined into the
+App Translocation sandbox. Double-click works on first launch with no
+"can't be opened" dialog and no `xattr -dr` dance.
+
+The signing path is gated on five secrets in the `prod` environment
+(`APPLE_CERT_P12_BASE64`, `APPLE_CERT_PASSWORD`, `APPLE_ID`,
+`APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`). When these are not
+present (e.g. on forks), the workflow falls back to the previous
+ad-hoc signing path so unprivileged builds still produce a launchable
+bundle. The temp keychain is torn down at the end of the macOS jobs
+regardless of success or failure.
+
+### CI fmt fix
+
+`recall_vault_path()` in src/main.rs used a single-line
+`if cond { Some(p) } else { None }` shape that the local rustfmt
+toolchain accepts but stable rustfmt on `dtolnay/rust-toolchain@stable`
+rewrites to a four-line block. CI failed on the diff; v2.3.2's release
+workflow shipped fine, but the CI badge went red. Rewrote as
+`Some(PathBuf::from(trimmed)).filter(|p| p.exists())`, which both
+formatters accept identically.
+
 ## v2.3.2 — 2026-05-02
 
 ### Recover the right vault after macOS App Translocation
