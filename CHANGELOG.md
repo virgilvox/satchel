@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.3.4 — 2026-05-02
+
+### release.yml workflow validation fix
+
+v2.3.3's release workflow had `secrets.X != ''` predicates inside step
+`if:` conditions to gate the new code-signing path. GitHub Actions
+disallows `secrets.*` in `if:` (parse-time rejection, no jobs
+created), so the v2.3.3 tag pushed but no Release artifacts were ever
+produced.
+
+The gate is moved into the script itself: each macOS-signing step
+unconditionally runs, then `set -e`-bails early when the relevant
+secrets are absent. `env.SIGNING_IDENTITY != ''` (which IS allowed in
+`if:`, populated via `$GITHUB_ENV` from the import step) handles the
+notarize step's gate.
+
+Functionally identical to the v2.3.3 intent, but the workflow now
+parses. v2.3.4 is the first tag that actually publishes a notarized
+build.
+
 ## v2.3.3 — 2026-05-02
 
 ### macOS releases are now Developer ID signed and notarized

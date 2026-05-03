@@ -130,14 +130,21 @@ jobs:
       # back to ad-hoc signing (still launchable locally with `xattr -dr
       # com.apple.quarantine`, just not notarized).
       - name: Import Apple signing certificate (macos)
-        if: |
-          (startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin'))
-          && secrets.APPLE_CERT_P12_BASE64 != ''
+        if: startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin')
         env:
           APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
         run: |
           set -euo pipefail
+          # `secrets.*` is not allowed in step `if:` conditions, so the
+          # gate has to live inside the script. Skip cleanly when the
+          # signing secrets aren't configured in the prod environment
+          # (e.g. on forks); the staging step downstream falls back to
+          # ad-hoc signing in that case.
+          if [ -z "${APPLE_CERT_P12_BASE64:-}" ]; then
+            echo "No APPLE_CERT_P12_BASE64 secret configured; skipping signing setup"
+            exit 0
+          fi
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
           CERT_PATH="$RUNNER_TEMP/devid.p12"
@@ -266,13 +273,16 @@ jobs:
         if: |
           (startsWith(matrix.target, 'x86_64-apple-darwin') || startsWith(matrix.target, 'aarch64-apple-darwin'))
           && env.SIGNING_IDENTITY != ''
-          && secrets.APPLE_ID != ''
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+            echo "Notarization secrets missing; bundle was Developer-ID signed but will not be notarized"
+            exit 0
+          fi
           echo "Submitting ${{ matrix.archive }} to Apple notary service…"
           xcrun notarytool submit "${{ matrix.archive }}" \
             --apple-id "$APPLE_ID" \

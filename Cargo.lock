@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "satchel-rag"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "anyhow",
  "axum",
