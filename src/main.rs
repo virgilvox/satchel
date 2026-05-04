@@ -23,18 +23,39 @@ struct Cli {
 /// Resolve where SATCHEL keeps its vault when `--vault` isn't passed.
 ///
 /// Order:
-/// 1. `vault/` next to the binary, or, on macOS, next to the `.app`
-///    bundle. Preserves the USB-stick deployment pattern where the binary
-///    and vault travel together.
-/// 2. Last-known-good path saved on a previous successful run (recovers
-///    the user's vault when macOS App Translocation copies the .app to
-///    a randomized sandbox path so step 1 cannot find the sibling vault).
-/// 3. Platform data directory: `~/Library/Application Support/satchel` (macOS),
-///    `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel` (Linux/BSD),
-///    `%APPDATA%/satchel` (Windows).
-/// 4. `./vault` as a final fallback if no env vars are set.
+/// 1. `vault/` next to the binary (or, on macOS, next to the `.app`
+///    bundle). The USB-stick deployment pattern: binary and vault
+///    travel together.
+/// 2. macOS App Translocation sandbox case only: fall back to the
+///    last-known-good vault path persisted on a previous run, since
+///    inside the sandbox `current_exe()` cannot see the user's
+///    real filesystem and the sibling vault is invisible.
+/// 3. No sibling and we are NOT in a translocation sandbox: this is a
+///    fresh deployment at a new location. Create a sibling vault here
+///    rather than dragging in a stale "last-known" path from somewhere
+///    else. A user who plugs in a second USB stick wants a fresh vault
+///    on it, not a pull-back to the first stick. Skipped for
+///    system-managed install paths (`/Applications`, `/usr`, `/opt`,
+///    `/System`, `/bin`, `/sbin`) where dropping a `vault/` next to
+///    the binary would be rude or read-only.
+/// 4. Platform data directory: `~/Library/Application Support/satchel`
+///    (macOS), `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel`
+///    (Linux/BSD), `%APPDATA%/satchel` (Windows).
+/// 5. `./vault` as the very last fallback if no env vars are set.
+///
+/// `ensure_default_vault` (called downstream) creates the vault on
+/// disk if it does not yet exist, so returning a not-yet-existing path
+/// is fine; the caller materializes it.
 fn default_vault_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
+        // 1. Sibling vault wins outright.
+        if let Some(p) = vault_next_to_exe(&exe) {
+            remember_vault_path(&p);
+            return p;
+        }
+        // 2. Translocation sandbox can never see a real sibling. Fall
+        //    back to the breadcrumb when present; otherwise drop to
+        //    the data-dir default.
         if is_translocated(&exe) {
             eprintln!(
                 "[satchel] Warning: running from macOS App Translocation sandbox\n  \
@@ -44,20 +65,94 @@ fn default_vault_path() -> PathBuf {
                  then reopen.",
                 exe.display(),
             );
-        }
-        if let Some(p) = vault_next_to_exe(&exe) {
-            remember_vault_path(&p);
-            return p;
+            if let Some(p) = recall_vault_path() {
+                eprintln!(
+                    "[satchel] Using last-known vault from a previous run: {}",
+                    p.display()
+                );
+                return p;
+            }
+            // No breadcrumb; fall through to data dir.
+        } else {
+            // 3. Fresh deployment at a real path with no sibling. Place
+            //    a new vault next to the binary (or the .app on macOS).
+            //    Do NOT consult the breadcrumb here: this is exactly
+            //    the "I plugged in a different USB stick, I want a
+            //    fresh vault" scenario, and silently pulling in a
+            //    stale path would be the wrong default.
+            if let Some(p) = preferred_sibling_vault_target(&exe) {
+                eprintln!(
+                    "[satchel] No vault found next to the binary; creating a fresh one at {}",
+                    p.display()
+                );
+                return p;
+            }
         }
     }
-    if let Some(p) = recall_vault_path() {
-        eprintln!(
-            "[satchel] Using last-known vault from previous run: {}",
-            p.display()
-        );
-        return p;
-    }
+    // 4. Platform data dir.
     platform_data_dir().unwrap_or_else(|| PathBuf::from("vault"))
+}
+
+/// Where a sibling vault SHOULD live for `exe` when no sibling exists
+/// yet. Returns None for system-managed locations where auto-creating
+/// `vault/` would be inappropriate (read-only, shared, or against
+/// platform conventions). The caller's `ensure_default_vault` will
+/// create the directory on first use.
+fn preferred_sibling_vault_target(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    // Resolve the "deployment dir" (the dir that holds the .app on
+    // macOS, the dir that holds the binary elsewhere).
+    let deploy_dir: PathBuf = if parent.ends_with("Contents/MacOS") {
+        // <deploy>/<App>.app/Contents/MacOS/<bin> -> <deploy>
+        parent.parent()?.parent()?.parent()?.to_path_buf()
+    } else {
+        parent.to_path_buf()
+    };
+
+    if is_system_install_path(&deploy_dir) {
+        return None;
+    }
+    Some(deploy_dir.join("vault"))
+}
+
+/// True when `dir` looks like a system-managed install location where
+/// SATCHEL should defer to the platform data directory rather than
+/// creating a sibling vault. Conservative on purpose: only paths that
+/// are unambiguously system-owned across macOS / Linux / Windows.
+fn is_system_install_path(dir: &Path) -> bool {
+    let s = dir.to_string_lossy();
+    // macOS / shared Unix
+    if s.starts_with("/Applications")
+        || s.starts_with("/System")
+        || s.starts_with("/Library")
+        || s.starts_with("/usr/")
+        || s == "/usr"
+        || s.starts_with("/opt/")
+        || s == "/opt"
+        || s.starts_with("/bin/")
+        || s == "/bin"
+        || s.starts_with("/sbin/")
+        || s == "/sbin"
+    {
+        return true;
+    }
+    // Common per-user toolchain bin directories: `cargo install`,
+    // `pip install --user`, `pipx`, `npm -g`. Auto-creating a vault
+    // there clutters the user's PATH dir.
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::Path::new(&home);
+        for sub in [".cargo/bin", ".local/bin", ".npm/bin", ".pyenv/shims"] {
+            if dir == home.join(sub) {
+                return true;
+            }
+        }
+    }
+    // Windows Program Files. `to_string_lossy` keeps the backslashes
+    // verbatim on Windows, so a starts_with check is sufficient.
+    if s.starts_with("C:\\Program Files") || s.starts_with("C:\\Windows") {
+        return true;
+    }
+    false
 }
 
 /// True when `exe` lives inside macOS's App Translocation sandbox. macOS
@@ -542,5 +637,62 @@ mod tests {
         let outer_vault = tmp.path().join("vault");
         std::fs::create_dir(&outer_vault).unwrap();
         assert_eq!(vault_next_to_exe(&exe), Some(inner_vault));
+    }
+
+    #[test]
+    fn preferred_sibling_target_for_app_bundle() {
+        // macOS: Satchel.app under a non-system path produces the
+        // sibling vault target right next to the .app.
+        let exe = PathBuf::from("/Volumes/USB/Satchel.app/Contents/MacOS/satchel");
+        assert_eq!(
+            preferred_sibling_vault_target(&exe),
+            Some(PathBuf::from("/Volumes/USB/vault"))
+        );
+    }
+
+    #[test]
+    fn preferred_sibling_target_for_raw_binary() {
+        // Linux/Windows: returns parent-of-binary + /vault.
+        let exe = PathBuf::from("/home/user/satchel-portable/satchel");
+        assert_eq!(
+            preferred_sibling_vault_target(&exe),
+            Some(PathBuf::from("/home/user/satchel-portable/vault"))
+        );
+    }
+
+    #[test]
+    fn preferred_sibling_target_skips_applications() {
+        // /Applications is system-managed; we should not auto-drop a
+        // `vault/` next to it.
+        let exe = PathBuf::from("/Applications/Satchel.app/Contents/MacOS/satchel");
+        assert_eq!(preferred_sibling_vault_target(&exe), None);
+    }
+
+    #[test]
+    fn preferred_sibling_target_skips_usr_local_bin() {
+        let exe = PathBuf::from("/usr/local/bin/satchel");
+        assert_eq!(preferred_sibling_vault_target(&exe), None);
+    }
+
+    #[test]
+    fn is_system_install_path_basic_cases() {
+        assert!(is_system_install_path(&PathBuf::from("/Applications")));
+        assert!(is_system_install_path(&PathBuf::from(
+            "/Applications/Satchel.app"
+        )));
+        assert!(is_system_install_path(&PathBuf::from("/usr/local/bin")));
+        assert!(is_system_install_path(&PathBuf::from("/usr")));
+        assert!(is_system_install_path(&PathBuf::from("/System/Library")));
+        assert!(is_system_install_path(&PathBuf::from("/opt/homebrew/bin")));
+
+        // Real deployment locations (USB stick, project dir, Downloads) are
+        // NOT system locations.
+        assert!(!is_system_install_path(&PathBuf::from("/Volumes/USB")));
+        assert!(!is_system_install_path(&PathBuf::from(
+            "/Users/alice/Projects/satchel"
+        )));
+        assert!(!is_system_install_path(&PathBuf::from(
+            "/Users/alice/Downloads"
+        )));
     }
 }

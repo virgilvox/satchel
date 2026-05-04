@@ -1,5 +1,74 @@
 # Changelog
 
+## v2.4.1 — 2026-05-04
+
+### Fresh deployment at a new path now creates a sibling vault (not the breadcrumb)
+
+v2.3.2 added a "last-known vault" breadcrumb to recover from macOS App
+Translocation. The fallback was too aggressive: it also fired when the
+.app was running from a new real path with no sibling vault yet (a
+second USB stick, a fresh extract on another disk), pulling in the
+old vault from a previous run instead of treating the new spot as a
+fresh deployment.
+
+v2.4.1 differentiates by translocation state:
+
+1. Sibling vault next to the binary or .app -> use it.
+2. Translocated (sandbox path with `AppTranslocation` in it) -> consult
+   the breadcrumb. The sandbox cannot see a real sibling and the user
+   genuinely wants their previous vault back.
+3. Not translocated and no sibling -> create a new sibling vault at the
+   deployment dir (next to the .app on macOS, next to the binary on
+   Linux/Windows). System install paths (`/Applications`, `/usr`,
+   `/opt`, `/System`, `/Library`, `~/.cargo/bin`, `~/.local/bin`,
+   `C:\Program Files`, `C:\Windows`) are skipped here; those defer to
+   the platform data dir as before so we do not auto-clutter shared
+   locations with `vault/`.
+4. Platform data dir is the final fallback.
+
+Net effect: plug a fresh USB stick into a Mac with v2.4.1 on it and
+double-clicking the .app creates a brand-new vault on the stick. The
+old breadcrumb still kicks in for the only scenario it was designed
+for (translocated launches that have no other path to the user's
+data).
+
+### System prompt scrub: avoid the "MCP" acronym, stronger retry guidance
+
+A user using a smaller model (Sonnet at low effort) saw the chat
+hallucinate "Multilingual Content Processor (MCP)" while reasoning
+about which tool to call, and give up after a single empty
+`search_knowledge {collection_id: 16}`. Two prompt fixes:
+
+- Replaced "MCP tools" with the literal tool names and a one-line
+  description per tool. The system prompt now lists `search_knowledge`,
+  `get_chunk_context`, `list_collections`, `list_sources`,
+  `get_document`, `list_tags`, `vault_stats` and tells the model these
+  are the only tools that exist; do not invent acronyms or guess what
+  they stand for. Smaller models will not riff on "MCP" anymore.
+- Added explicit retry guidance: vary the query, drop the collection
+  filter, call `list_collections` / `list_sources` to discover what is
+  actually present before declaring "no information." Specifically
+  warns against passing `collection_id` values that were not first
+  seen in a `list_collections` result; prefer `collection_name`.
+
+### Tests + verification
+
+- 5 new unit tests cover the new vault-resolution branch:
+  preferred sibling target for an .app on a non-system path, raw
+  binary, /Applications skip, /usr/local/bin skip, and a broad pass
+  over the system-install-path predicate.
+- Total 201 passing (was 196).
+- `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build
+  --release --features embed-model` all clean. Web bundle rebuilt.
+
+### Deferred to v2.5.0
+
+The chat tab still has no scope picker for collections; users rely on
+Claude to remember and pass `collection_name` correctly. v2.5.0 will
+add a sticky scope chip in the chat header that auto-injects the
+selected collection into every search call (and lets the user toggle
+between "whole vault" and a named collection).
+
 ## v2.4.0 — 2026-05-03
 
 ### `get_chunk_context` MCP tool — expand a hit by N neighboring chunks
