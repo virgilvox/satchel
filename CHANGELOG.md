@@ -1,5 +1,69 @@
 # Changelog
 
+## v2.4.3 — 2026-05-04
+
+### See through macOS App Translocation; fresh deploys now actually get fresh vaults
+
+v2.4.1 fixed the breadcrumb-falls-through-to-stale-vault problem for
+non-translocated launches. v2.4.2's notarization helped on subsequent
+launches. Neither fixed the case the user actually hits most often:
+**first launch of a freshly downloaded .app**. macOS quarantines any
+browser download (Chrome's `com.apple.quarantine` xattr) and runs the
+app from a randomized App Translocation sandbox the first time, even
+when the .app is fully Developer-ID-signed and notarized. From inside
+the sandbox `current_exe()` cannot see the user's filesystem, so the
+sibling-vault probe fails and the breadcrumb fires, dragging in the
+wrong vault.
+
+v2.4.3 fixes this by resolving the sandbox path back to the real
+install path via Apple's public API
+`SecTranslocateCreateOriginalPathForURL` in `Security.framework`. On a
+translocated launch SATCHEL now logs:
+
+```
+[satchel] App Translocation detected; resolved real .app path:
+  /Users/you/Projects/satchel/q2/Satchel.app/Contents/MacOS/satchel
+```
+
+…and the rest of `default_vault_path` operates on that real path:
+sibling vault detection works, `preferred_sibling_vault_target`
+auto-creates a fresh vault next to the .app, and the breadcrumb is
+correctly bypassed. Net effect: drop a v2.4.3 .app into a new folder
+on a fresh USB stick and the first double-click creates a vault on
+that stick, not at your last-known location.
+
+If `SecTranslocate` fails for any reason (offline disk, exotic OS
+patch level), the v2.4.1 breadcrumb fallback still kicks in as a
+safety net so you don't get a hard error.
+
+### Implementation
+
+- `src/macos_translocation.rs` (new). Raw FFI to two CoreFoundation
+  symbols (`CFURLCreateFromFileSystemRepresentation`,
+  `CFURLCopyFileSystemPath`, `CFStringGetLength`,
+  `CFStringGetMaximumSizeForEncoding`, `CFStringGetCString`,
+  `CFRelease`) and one Security symbol
+  (`SecTranslocateCreateOriginalPathForURL`). No new crate dep; we
+  link the system frameworks directly. On non-macOS targets the
+  resolver is a stub that returns `None`.
+- `default_vault_path` in `src/main.rs` calls the resolver before any
+  sibling probing. The rest of the resolution branches operate on the
+  resolved real path; everything works transparently.
+
+### Tests + verification
+
+- 3 new unit tests in `macos_translocation.rs`: empty path returns
+  None; nonexistent path returns None safely (no crash); the FFI
+  links and runs against a real non-translocated path
+  (`/usr/bin/cat`) without panicking.
+- 216 tests pass total (was 213).
+- Live smoke test against an actual translocated process:
+  SecTranslocate resolved
+  `/private/var/folders/.../AppTranslocation/<UUID>/d/Satchel.app/...`
+  back to
+  `/Users/you/Projects/satchel/q2/Satchel.app/...` exactly as
+  expected.
+
 ## v2.4.2 — 2026-05-04
 
 ### CSV / TSV: row-aware ingest, not "whole file as one chunk"

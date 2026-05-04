@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use satchel_rag::{embed, ingest, mcp, rag, server, vault};
 use std::path::{Path, PathBuf};
 
+mod macos_translocation;
+
 #[derive(Parser)]
 #[command(
     name = "satchel",
@@ -23,21 +25,25 @@ struct Cli {
 /// Resolve where SATCHEL keeps its vault when `--vault` isn't passed.
 ///
 /// Order:
-/// 1. `vault/` next to the binary (or, on macOS, next to the `.app`
-///    bundle). The USB-stick deployment pattern: binary and vault
-///    travel together.
-/// 2. macOS App Translocation sandbox case only: fall back to the
-///    last-known-good vault path persisted on a previous run, since
-///    inside the sandbox `current_exe()` cannot see the user's
-///    real filesystem and the sibling vault is invisible.
-/// 3. No sibling and we are NOT in a translocation sandbox: this is a
-///    fresh deployment at a new location. Create a sibling vault here
-///    rather than dragging in a stale "last-known" path from somewhere
-///    else. A user who plugs in a second USB stick wants a fresh vault
-///    on it, not a pull-back to the first stick. Skipped for
-///    system-managed install paths (`/Applications`, `/usr`, `/opt`,
-///    `/System`, `/bin`, `/sbin`) where dropping a `vault/` next to
-///    the binary would be rude or read-only.
+/// 0. If `current_exe()` is in a macOS App Translocation sandbox, ask
+///    Security.framework's `SecTranslocateCreateOriginalPathForURL` for
+///    the real path the .app actually lives at on the user's disk. The
+///    rest of the resolution operates on that real path. This is what
+///    makes "fresh USB stick, fresh sibling vault" work even when
+///    macOS quarantined the freshly-extracted .app and translocated it
+///    on first launch.
+/// 1. `vault/` next to the (resolved) binary (or, on macOS, next to
+///    the `.app` bundle). The USB-stick deployment pattern.
+/// 2. Translocation resolution failed AND we still appear translocated:
+///    fall back to the last-known-good vault path persisted on a
+///    previous run. Best-effort; rare in practice on macOS 10.12+ where
+///    SecTranslocate is reliable.
+/// 3. No sibling and we are at a real path with no vault yet: create a
+///    sibling vault next to the binary. This is "I plugged in a fresh
+///    USB stick / extracted to a fresh folder, give me a fresh vault."
+///    Skipped for system-managed install paths (`/Applications`,
+///    `/usr`, `/opt`, `/System`, `/Library`, `~/.cargo/bin`, etc.)
+///    where dropping a `vault/` next to the binary would be rude.
 /// 4. Platform data directory: `~/Library/Application Support/satchel`
 ///    (macOS), `$XDG_DATA_HOME/satchel` or `~/.local/share/satchel`
 ///    (Linux/BSD), `%APPDATA%/satchel` (Windows).
@@ -47,48 +53,76 @@ struct Cli {
 /// disk if it does not yet exist, so returning a not-yet-existing path
 /// is fine; the caller materializes it.
 fn default_vault_path() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        // 1. Sibling vault wins outright.
-        if let Some(p) = vault_next_to_exe(&exe) {
-            remember_vault_path(&p);
+    let Ok(exe) = std::env::current_exe() else {
+        return platform_data_dir().unwrap_or_else(|| PathBuf::from("vault"));
+    };
+
+    // 0. Resolve translocation BEFORE any sibling probing. SecTranslocate
+    //    returns the un-translocated path on macOS 10.12+; on Linux /
+    //    Windows the helper is a no-op stub. Once we have the real path,
+    //    every downstream branch operates on it transparently — sibling
+    //    vault probe, fresh-deployment auto-creation, and the
+    //    is-system-install-path guard all just work.
+    let translocated = is_translocated(&exe);
+    let real_exe: PathBuf = if translocated {
+        match macos_translocation::resolve_translocated_path(&exe) {
+            Some(real) => {
+                eprintln!(
+                    "[satchel] App Translocation detected; resolved real .app path: {}",
+                    real.display()
+                );
+                real
+            }
+            None => {
+                eprintln!(
+                    "[satchel] Warning: running from macOS App Translocation sandbox\n  \
+                     ({}).\n  \
+                     Could not resolve the original .app path via SecTranslocate. \
+                     To fix permanently, quit and run:\n  \
+                     xattr -dr com.apple.quarantine /path/to/Satchel.app\n  \
+                     then reopen.",
+                    exe.display(),
+                );
+                exe.clone()
+            }
+        }
+    } else {
+        exe.clone()
+    };
+
+    // 1. Sibling vault next to the real path wins outright.
+    if let Some(p) = vault_next_to_exe(&real_exe) {
+        remember_vault_path(&p);
+        return p;
+    }
+
+    // 2. Translocation that we could not resolve: best-effort recovery
+    //    via the breadcrumb. This branch should be rare; SecTranslocate
+    //    succeeds on every modern macOS.
+    if translocated && is_translocated(&real_exe) {
+        if let Some(p) = recall_vault_path() {
+            eprintln!(
+                "[satchel] Using last-known vault from a previous run: {}",
+                p.display()
+            );
+            eprintln!(
+                "[satchel]   This is a fallback; if you wanted a fresh vault at the \
+                 launch location, fix quarantine and reopen."
+            );
             return p;
         }
-        // 2. Translocation sandbox can never see a real sibling. Fall
-        //    back to the breadcrumb when present; otherwise drop to
-        //    the data-dir default.
-        if is_translocated(&exe) {
+        // No breadcrumb; fall through to data dir.
+    } else {
+        // 3. Real path, no sibling. Create a fresh sibling vault.
+        if let Some(p) = preferred_sibling_vault_target(&real_exe) {
             eprintln!(
-                "[satchel] Warning: running from macOS App Translocation sandbox\n  \
-                 ({}).\n  \
-                 The vault next to the .app bundle is invisible from here. \
-                 Quit, run `xattr -dr com.apple.quarantine /path/to/Satchel.app`, \
-                 then reopen.",
-                exe.display(),
+                "[satchel] No vault found next to the binary; creating a fresh one at {}",
+                p.display()
             );
-            if let Some(p) = recall_vault_path() {
-                eprintln!(
-                    "[satchel] Using last-known vault from a previous run: {}",
-                    p.display()
-                );
-                return p;
-            }
-            // No breadcrumb; fall through to data dir.
-        } else {
-            // 3. Fresh deployment at a real path with no sibling. Place
-            //    a new vault next to the binary (or the .app on macOS).
-            //    Do NOT consult the breadcrumb here: this is exactly
-            //    the "I plugged in a different USB stick, I want a
-            //    fresh vault" scenario, and silently pulling in a
-            //    stale path would be the wrong default.
-            if let Some(p) = preferred_sibling_vault_target(&exe) {
-                eprintln!(
-                    "[satchel] No vault found next to the binary; creating a fresh one at {}",
-                    p.display()
-                );
-                return p;
-            }
+            return p;
         }
     }
+
     // 4. Platform data dir.
     platform_data_dir().unwrap_or_else(|| PathBuf::from("vault"))
 }
