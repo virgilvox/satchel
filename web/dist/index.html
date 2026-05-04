@@ -19,7 +19,7 @@ How to use the vault
 
 Reading conversational data
 - A lot of vault content is conversational: Slack messages, Discord chats, WhatsApp threads, ChatGPT and Claude.ai exports, email. A single matched chunk in this kind of data is usually a fragment of a longer thread.
-- When a result looks like a chat message or thread fragment, fetch surrounding context before drawing conclusions: use \`list_sources\` or \`get_document\` (or another search scoped to the same source path) to read the messages immediately before and after.
+- When a result looks like a chat message or thread fragment, fetch surrounding context before drawing conclusions. The \`get_chunk_context\` tool is the right way: pass the result's \`chunk_id\` and a small window (2 to 5 each side is usually enough) to read the messages immediately before and after, scoped to the same source document. \`get_document\` also works for the whole document at once when the fragment is part of a short note.
 - Single-line sarcasm, replies, callbacks, and inside jokes routinely flip meaning when you read only the matched line. If a message is short, ambiguous, or refers to "this", "that", or "earlier", treat fetching context as required, not optional.
 - When you cite a chat message, name the participants and approximate timeframe if visible. "Alice in #design on 2026-04-12" beats a bare quote.
 

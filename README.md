@@ -269,11 +269,13 @@ When connected, your AI client can use these tools:
 
 | Tool | What it does |
 |------|-------------|
-| `search_knowledge` | Semantic search across all documents |
-| `list_sources` | List ingested documents with metadata |
-| `get_document` | Retrieve the full text of a document |
-| `list_tags` | List tags and categories |
-| `vault_stats` | Storage stats, document counts, model info |
+| `search_knowledge` | Hybrid retrieval (dense cosine + BM25 via FTS5, fused with Reciprocal Rank Fusion). Returns ranked chunks with `chunk_id`, source path, and tags. Accepts `collection_name`, `filter_source`, `filter_tags`. |
+| `get_chunk_context` | Expand a search hit by N chunks before and after, scoped to the same document. Use after `search_knowledge` when the matched chunk is a short or ambiguous fragment (a single chat message, a sentence quoting an earlier referent). Pass the hit's `chunk_id` plus `before`/`after` windows. |
+| `list_sources` | List ingested documents grouped by source path, with record and chunk counts. Paginated. |
+| `get_document` | Retrieve the full text of a document by source path or document id. |
+| `list_collections` | List the named collections (subsets) in the vault. |
+| `list_tags` | List tags and per-tag document counts. |
+| `vault_stats` | Storage stats, document and chunk counts, embedding model info. |
 
 ## Managing Your Data
 

@@ -9,6 +9,9 @@ pub struct Database {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
+    /// Stable chunk identifier (`{document_id}:{chunk_index}`). Pass to
+    /// `get_chunk_context` to expand the hit with neighboring chunks.
+    pub chunk_id: String,
     pub text: String,
     pub source: String,
     pub score: f32,
@@ -24,6 +27,19 @@ pub struct SearchPage {
     pub total: usize,
     pub offset: usize,
     pub limit: usize,
+}
+
+/// One chunk in the same-document neighborhood of a hit. Returned by
+/// `get_chunk_context` so an LLM can read the conversational frame
+/// around a fragment (Slack-thread context, the messages immediately
+/// before and after a quoted line, etc.) before drawing conclusions.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChunkContext {
+    pub chunk_id: String,
+    pub document_id: String,
+    pub source_path: String,
+    pub chunk_index: usize,
+    pub text: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -323,6 +339,7 @@ impl Database {
                     let embedding = blob_to_embedding(&embedding_blob);
                     let score = cosine_similarity(query_embedding, &embedding);
                     let fr = FusedRow {
+                        chunk_id: id.clone(),
                         text: row.get(1)?,
                         source: row.get(2)?,
                         document_id: row.get(3)?,
@@ -377,6 +394,7 @@ impl Database {
                     .query_map(params![fts_query, RRF_SPARSE_LIMIT as i64], |row| {
                         let id: String = row.get(0)?;
                         let fr = FusedRow {
+                            chunk_id: id.clone(),
                             text: row.get(1)?,
                             source: row.get(2)?,
                             document_id: row.get(3)?,
@@ -424,6 +442,7 @@ impl Database {
                 None => true,
             })
             .map(|(_, fr)| SearchResult {
+                chunk_id: fr.chunk_id,
                 text: fr.text,
                 source: fr.source,
                 score: fr.rrf,
@@ -456,6 +475,76 @@ impl Database {
             offset,
             limit,
         })
+    }
+
+    /// Return the chunk identified by `chunk_id` plus up to `before`
+    /// chunks immediately preceding it and `after` chunks immediately
+    /// following it, all from the same document, ordered by
+    /// `chunk_index`. The center chunk is always included when it
+    /// exists.
+    ///
+    /// Use this after a search hit to give an LLM enough conversational
+    /// frame to interpret a fragment correctly. Particularly important
+    /// for chat archives (Slack threads, Discord channels, email
+    /// replies) where a single matched line is often a callback,
+    /// sarcasm, or a referent that flips meaning without surrounding
+    /// context.
+    ///
+    /// Returns an empty Vec if `chunk_id` does not exist.
+    pub fn get_chunk_context(
+        &self,
+        chunk_id: &str,
+        before: usize,
+        after: usize,
+    ) -> Result<Vec<ChunkContext>> {
+        let conn = self.conn.lock().unwrap();
+
+        // First resolve the center chunk to its document and sequence
+        // index. If the id is unknown we return an empty Vec rather
+        // than erroring; the typical caller is a tool surface where a
+        // helpful empty result is better than a 500.
+        let center: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT document_id, chunk_index FROM chunks WHERE id = ?1",
+                params![chunk_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .ok();
+        let Some((document_id, center_index)) = center else {
+            return Ok(Vec::new());
+        };
+
+        // Saturating arithmetic on both bounds. `as i64` on a usize
+        // larger than i64::MAX (e.g. usize::MAX) silently wraps to
+        // -1 on 64-bit, which would shrink the window instead of
+        // expanding it; clamp via u64 first.
+        let i64_cap = |n: usize| -> i64 { (n as u64).min(i64::MAX as u64) as i64 };
+        let lo = center_index.saturating_sub(i64_cap(before));
+        let hi = center_index.saturating_add(i64_cap(after));
+
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.document_id, d.source_path, c.chunk_index, c.text
+             FROM chunks c
+             JOIN documents d ON d.id = c.document_id
+             WHERE c.document_id = ?1
+               AND c.chunk_index BETWEEN ?2 AND ?3
+             ORDER BY c.chunk_index ASC",
+        )?;
+
+        let rows: Vec<ChunkContext> = stmt
+            .query_map(params![document_id, lo, hi], |row| {
+                Ok(ChunkContext {
+                    chunk_id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    source_path: row.get(2)?,
+                    chunk_index: row.get::<_, i64>(3)? as usize,
+                    text: row.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
     }
 
     /// List sources grouped by `source_path`. Each row aggregates all
@@ -1144,6 +1233,7 @@ fn escape_like(s: &str) -> String {
 /// Per-chunk row carried through the fusion pipeline.
 #[derive(Clone)]
 struct FusedRow {
+    chunk_id: String,
     text: String,
     source: String,
     document_id: String,
@@ -2169,6 +2259,117 @@ mod tests {
             .unwrap();
         assert!(records.is_empty());
         assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_get_chunk_context_returns_neighbors() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("doc1", "/notes.md", "md", None, "raw", "hash1")
+            .unwrap();
+        let v = vec![1.0, 0.0];
+        for i in 0..6 {
+            db.insert_chunk(
+                &format!("doc1:{i}"),
+                "doc1",
+                i,
+                &format!("chunk {i} body"),
+                3,
+                0,
+                14,
+                &v,
+            )
+            .unwrap();
+        }
+        let ctx = db.get_chunk_context("doc1:2", 1, 2).unwrap();
+        let indices: Vec<usize> = ctx.iter().map(|c| c.chunk_index).collect();
+        assert_eq!(indices, vec![1, 2, 3, 4]);
+        assert!(ctx.iter().all(|c| c.document_id == "doc1"));
+        assert!(ctx.iter().all(|c| c.source_path == "/notes.md"));
+        assert_eq!(ctx[1].text, "chunk 2 body");
+    }
+
+    #[test]
+    fn test_get_chunk_context_clamps_at_start() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("doc1", "/notes.md", "md", None, "raw", "hash1")
+            .unwrap();
+        let v = vec![1.0, 0.0];
+        for i in 0..3 {
+            db.insert_chunk(
+                &format!("doc1:{i}"),
+                "doc1",
+                i,
+                &format!("chunk {i}"),
+                1,
+                0,
+                7,
+                &v,
+            )
+            .unwrap();
+        }
+        // Asking for 5 chunks before chunk 0 should not underflow; we
+        // expect [0, 1] (chunk 0 plus one after).
+        let ctx = db.get_chunk_context("doc1:0", 5, 1).unwrap();
+        let indices: Vec<usize> = ctx.iter().map(|c| c.chunk_index).collect();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_get_chunk_context_clamps_at_end() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("doc1", "/notes.md", "md", None, "raw", "hash1")
+            .unwrap();
+        let v = vec![1.0, 0.0];
+        for i in 0..3 {
+            db.insert_chunk(
+                &format!("doc1:{i}"),
+                "doc1",
+                i,
+                &format!("chunk {i}"),
+                1,
+                0,
+                7,
+                &v,
+            )
+            .unwrap();
+        }
+        // Asking for many chunks after the last index should clamp at
+        // the document's last chunk; usize::MAX must not overflow when
+        // added to the center index.
+        let ctx = db.get_chunk_context("doc1:2", 1, usize::MAX).unwrap();
+        let indices: Vec<usize> = ctx.iter().map(|c| c.chunk_index).collect();
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_get_chunk_context_unknown_chunk_empty() {
+        let db = Database::open_memory().unwrap();
+        let ctx = db
+            .get_chunk_context("doesnotexist", 1, 1)
+            .expect("unknown chunk should not error");
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_get_chunk_context_does_not_cross_documents() {
+        // Two documents share consecutive chunk_index values; the
+        // neighborhood query must scope to one document's id.
+        let db = Database::open_memory().unwrap();
+        db.insert_document("doc1", "/a.md", "md", None, "x", "h1")
+            .unwrap();
+        db.insert_document("doc2", "/b.md", "md", None, "y", "h2")
+            .unwrap();
+        let v = vec![1.0, 0.0];
+        for i in 0..3 {
+            db.insert_chunk(&format!("doc1:{i}"), "doc1", i, "a-text", 1, 0, 6, &v)
+                .unwrap();
+            db.insert_chunk(&format!("doc2:{i}"), "doc2", i, "b-text", 1, 0, 6, &v)
+                .unwrap();
+        }
+        let ctx = db.get_chunk_context("doc1:1", 5, 5).unwrap();
+        assert!(ctx.iter().all(|c| c.document_id == "doc1"));
+        assert!(ctx.iter().all(|c| c.source_path == "/a.md"));
+        assert_eq!(ctx.len(), 3);
     }
 
     #[test]

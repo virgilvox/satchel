@@ -28,7 +28,7 @@ async fn test_mcp_initialize_flow() {
 
     let req = make_request("tools/list", Some(json!(2)), Some(json!({})));
     let result = mcp::handle_request(&req, &db, &embedder).await;
-    assert_eq!(result["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(result["tools"].as_array().unwrap().len(), 7);
 }
 
 #[tokio::test]
@@ -169,6 +169,123 @@ async fn test_mcp_list_collections() {
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Work"));
     assert!(text.contains("Personal"));
+}
+
+#[tokio::test]
+async fn test_mcp_search_surfaces_chunk_id() {
+    // The search_knowledge response must include `chunk_id:` per result so
+    // an LLM can pass it back to `get_chunk_context`. Regression guard:
+    // dropping this line would silently break the expansion path.
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+    common::seed_data(&db, 2);
+
+    let req = make_request(
+        "tools/call",
+        Some(json!(1)),
+        Some(json!({
+            "name": "search_knowledge",
+            "arguments": { "query": "Content", "top_k": 5 }
+        })),
+    );
+    let result = mcp::handle_request(&req, &db, &embedder).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("chunk_id: doc-0:"),
+        "search output is missing chunk_id; got:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_get_chunk_context_returns_neighborhood() {
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+
+    // Lay out one document with five sequential chunks. We'll ask for
+    // the neighborhood around chunk 2 with before=1, after=2.
+    db.insert_document("doc1", "/notes.md", "md", None, "raw", "hash1")
+        .unwrap();
+    let v = vec![1.0_f32; 384];
+    for i in 0..5 {
+        db.insert_chunk(
+            &format!("doc1:{i}"),
+            "doc1",
+            i,
+            &format!("body of chunk {i}"),
+            4,
+            0,
+            17,
+            &v,
+        )
+        .unwrap();
+    }
+
+    let req = make_request(
+        "tools/call",
+        Some(json!(1)),
+        Some(json!({
+            "name": "get_chunk_context",
+            "arguments": { "chunk_id": "doc1:2", "before": 1, "after": 2 }
+        })),
+    );
+    let result = mcp::handle_request(&req, &db, &embedder).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("/notes.md"));
+    assert!(text.contains("body of chunk 1"));
+    assert!(text.contains("body of chunk 2"));
+    assert!(text.contains("body of chunk 3"));
+    assert!(text.contains("body of chunk 4"));
+    assert!(
+        !text.contains("body of chunk 0"),
+        "before=1 must not pull chunk 0"
+    );
+    assert!(
+        text.contains("(center)"),
+        "center marker missing on the requested chunk"
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_get_chunk_context_unknown_chunk() {
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+
+    let req = make_request(
+        "tools/call",
+        Some(json!(1)),
+        Some(json!({
+            "name": "get_chunk_context",
+            "arguments": { "chunk_id": "doesnotexist:99", "before": 2, "after": 2 }
+        })),
+    );
+    let result = mcp::handle_request(&req, &db, &embedder).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("No chunks found"));
+    // Soft failure (helpful text), not an error envelope.
+    assert!(result
+        .get("isError")
+        .is_none_or(|v| v.as_bool() != Some(true)));
+}
+
+#[tokio::test]
+async fn test_mcp_get_chunk_context_missing_chunk_id() {
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+
+    let req = make_request(
+        "tools/call",
+        Some(json!(1)),
+        Some(json!({
+            "name": "get_chunk_context",
+            "arguments": { "before": 2, "after": 2 }
+        })),
+    );
+    let result = mcp::handle_request(&req, &db, &embedder).await;
+    assert_eq!(result["isError"], json!(true));
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("chunk_id"));
 }
 
 #[tokio::test]

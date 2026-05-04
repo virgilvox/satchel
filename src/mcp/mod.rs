@@ -138,6 +138,30 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "get_chunk_context",
+                "description": "Return chunks immediately surrounding a search hit, scoped to the same source document. Use this when a `search_knowledge` result looks like a fragment (a single chat message, a quoted sentence, an isolated reply): pass the result's `chunk_id` and a small window to read the conversation or paragraph around it before drawing a conclusion. Particularly important for chat archives (Slack threads, Discord channels, email replies, ChatGPT/Claude.ai conversations) where one matched line is often a callback, sarcasm, or referent that flips meaning without surrounding context. Center chunk is always included; window clamps cleanly at document start/end.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "chunk_id": {
+                            "type": "string",
+                            "description": "The chunk_id of the hit you want to expand around. `search_knowledge` results expose this as `chunk_id` per result."
+                        },
+                        "before": {
+                            "type": "integer",
+                            "description": "How many chunks immediately preceding the center chunk to include (default 2, max 20).",
+                            "default": 2
+                        },
+                        "after": {
+                            "type": "integer",
+                            "description": "How many chunks immediately following the center chunk to include (default 2, max 20).",
+                            "default": 2
+                        }
+                    },
+                    "required": ["chunk_id"]
+                }
             }
         ]
     })
@@ -175,6 +199,7 @@ pub async fn handle_request(request: &JsonRpcRequest, db: &Database, embedder: &
                 "list_tags" => handle_list_tags(db),
                 "vault_stats" => handle_vault_stats(db),
                 "list_collections" => handle_list_collections(db),
+                "get_chunk_context" => handle_get_chunk_context(args, db),
                 _ => tool_error(&format!("Unknown tool: {tool_name}")),
             }
         }
@@ -259,15 +284,58 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
     }
     for (i, result) in page.results.iter().enumerate() {
         text.push_str(&format!(
-            "--- Result {} (score: {:.3}) ---\nSource: {}\n{}\n\n",
+            "--- Result {} (score: {:.3}) ---\nSource: {}\nchunk_id: {}\n{}\n\n",
             i + 1,
             result.score,
             result.source,
+            result.chunk_id,
             result.text
         ));
     }
 
     tool_text(&text)
+}
+
+fn handle_get_chunk_context(args: &Value, db: &Database) -> Value {
+    let chunk_id = args["chunk_id"].as_str().unwrap_or("");
+    if chunk_id.is_empty() {
+        return tool_error("`chunk_id` is required");
+    }
+    // Cap window sizes to keep responses bounded. 20 each direction is
+    // already 41 chunks of context; more than enough for any chat
+    // thread or paragraph fetch and well under typical context limits.
+    let before = args["before"].as_u64().unwrap_or(2).min(20) as usize;
+    let after = args["after"].as_u64().unwrap_or(2).min(20) as usize;
+
+    match db.get_chunk_context(chunk_id, before, after) {
+        Ok(chunks) if chunks.is_empty() => {
+            tool_text(&format!("No chunks found for chunk_id={chunk_id:?}"))
+        }
+        Ok(chunks) => {
+            let first = chunks.first().expect("non-empty checked above");
+            let last = chunks.last().expect("non-empty checked above");
+            let mut out = format!(
+                "Source: {}\nReturned {} chunks (chunk_index {}..={}):\n\n",
+                first.source_path,
+                chunks.len(),
+                first.chunk_index,
+                last.chunk_index,
+            );
+            for c in &chunks {
+                let marker = if c.chunk_id == chunk_id {
+                    " (center)"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "--- chunk_index {}{} (chunk_id: {}) ---\n{}\n\n",
+                    c.chunk_index, marker, c.chunk_id, c.text
+                ));
+            }
+            tool_text(&out)
+        }
+        Err(e) => tool_error(&format!("Error: {e}")),
+    }
 }
 
 fn handle_list_sources(args: &Value, db: &Database) -> Value {
@@ -445,9 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_definitions_has_six_tools() {
+    fn test_tool_definitions_has_expected_count() {
         let defs = tool_definitions();
-        assert_eq!(defs["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(defs["tools"].as_array().unwrap().len(), 7);
     }
 
     #[test]
@@ -465,6 +533,7 @@ mod tests {
         assert!(names.contains(&"list_tags"));
         assert!(names.contains(&"vault_stats"));
         assert!(names.contains(&"list_collections"));
+        assert!(names.contains(&"get_chunk_context"));
     }
 
     #[test]
@@ -508,7 +577,7 @@ mod tests {
             &Embedder::fixed(384),
         )
         .await;
-        assert_eq!(result["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 7);
     }
 
     #[tokio::test]

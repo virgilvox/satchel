@@ -1,5 +1,57 @@
 # Changelog
 
+## v2.4.0 — 2026-05-03
+
+### `get_chunk_context` MCP tool — expand a hit by N neighboring chunks
+
+Adds a new MCP tool, `get_chunk_context(chunk_id, before, after)`, that
+returns the chunk identified by `chunk_id` plus up to `before` chunks
+preceding and `after` chunks following it, all from the same document
+and ordered by `chunk_index`. Window clamps cleanly at document
+boundaries; unknown `chunk_id` returns an empty list (not an error).
+
+Why: a lot of vault content is conversational (Slack threads, Discord,
+WhatsApp, ChatGPT/Claude.ai exports, email reply chains). A single
+matched chunk in this kind of data is often a fragment whose meaning
+flips with one message of context. The Anthropic chat path's existing
+SATCHEL system prompt already tells Claude to fetch surrounding
+context for chat-shaped fragments; v2.4.0 gives it the right tool for
+the job, scoped to one document so the LLM does not have to do a
+second search to find neighbors.
+
+`search_knowledge` results now include `chunk_id` per hit so an LLM
+can call `get_chunk_context` directly on a result. Existing fields
+(score, source, text, tags, chunk_index) are unchanged.
+
+Implementation:
+- `Database::get_chunk_context` (`src/rag/mod.rs`) — single SQL
+  `BETWEEN` over `chunks` joined to `documents`. Saturating
+  arithmetic on the bounds, with explicit `usize -> i64` clamping
+  via u64 to avoid wrap-to-negative on values larger than `i64::MAX`.
+- New `ChunkContext` struct returned to callers (`chunk_id`,
+  `document_id`, `source_path`, `chunk_index`, `text`).
+- `chunk_id: String` added to `SearchResult` and `FusedRow`.
+- MCP tool definition + `handle_get_chunk_context` handler in
+  `src/mcp/mod.rs`. Window sizes capped at 20 each direction (41
+  chunks total, comfortably under any context-window concern).
+- Search MCP output now includes `chunk_id: <id>` per result so the
+  LLM can call `get_chunk_context` directly without a second lookup.
+- SATCHEL system prompt updated to direct Claude to use the new tool
+  for chat-shaped fragments.
+
+Tests added (9 new; 196 total passing):
+- DB: returns the requested neighborhood; clamps at start; clamps at
+  end (including `usize::MAX` window); unknown id returns empty;
+  query never crosses document boundaries.
+- MCP: search output surfaces `chunk_id` (regression guard); tool
+  call returns the expected neighborhood with center marker; unknown
+  chunk_id returns helpful text not an error envelope; missing
+  `chunk_id` arg returns a tool error.
+
+Documentation: README MCP-tools table rewritten to list all seven
+tools (was five, missing `list_collections` and the new
+`get_chunk_context`) with accurate descriptions.
+
 ## v2.3.4 — 2026-05-02
 
 ### release.yml workflow validation fix
