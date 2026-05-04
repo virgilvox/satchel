@@ -155,12 +155,16 @@ async fn test_ingest_csv_emits_one_record_per_row() {
         .iter()
         .find(|r| r.text.contains("Alice"))
         .expect("Alice row missing");
-    assert!(alice.text.contains("name: Alice"), "header repeated: name");
-    assert!(
-        alice.text.contains("email: alice@example.com"),
-        "header repeated: email"
-    );
-    assert!(alice.text.contains("role: founder"), "header repeated: role");
+    // Use let-bindings so each `assert!` is short enough that every
+    // rustfmt version we ship through (local nightly, CI stable) keeps
+    // it on one line. Past releases tripped the fmt CI gate when one
+    // form was just barely over the wrap threshold for stable.
+    let has_name = alice.text.contains("name: Alice");
+    let has_email = alice.text.contains("email: alice@example.com");
+    let has_role = alice.text.contains("role: founder");
+    assert!(has_name, "header repeated: name");
+    assert!(has_email, "header repeated: email");
+    assert!(has_role, "header repeated: role");
     // Crucially, Alice's body must NOT contain Bob's data: each row is
     // its own document/chunk.
     assert!(!alice.text.contains("Bob"), "row separation broken");
