@@ -21,6 +21,7 @@ use crate::rag::Database;
 
 pub mod chatgpt;
 pub mod claude_ai;
+pub mod csv;
 pub mod discord;
 pub mod mbox;
 pub mod slack;
@@ -35,6 +36,7 @@ pub enum ArchiveKind {
     Discord,
     WhatsApp,
     Mbox,
+    Csv,
 }
 
 impl ArchiveKind {
@@ -46,6 +48,7 @@ impl ArchiveKind {
             ArchiveKind::Discord => "discord",
             ArchiveKind::WhatsApp => "whatsapp",
             ArchiveKind::Mbox => "mbox",
+            ArchiveKind::Csv => "csv",
         }
     }
 }
@@ -80,6 +83,9 @@ pub fn detect(path: &Path) -> Option<ArchiveKind> {
         }
         if discord::detect(path) {
             return Some(ArchiveKind::Discord);
+        }
+        if csv::detect(path) {
+            return Some(ArchiveKind::Csv);
         }
         return None;
     }
@@ -124,6 +130,7 @@ pub fn ingest(
         ArchiveKind::Discord => discord::ingest(path, db, embedder, progress),
         ArchiveKind::WhatsApp => whatsapp::ingest(path, db, embedder, progress),
         ArchiveKind::Mbox => mbox::ingest(path, db, embedder, progress),
+        ArchiveKind::Csv => csv::ingest(path, db, embedder, progress),
     }
 }
 

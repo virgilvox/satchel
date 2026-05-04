@@ -178,6 +178,18 @@ fn ingest_file(
         .unwrap_or("")
         .to_lowercase();
 
+    // File-level archive handlers (csv, tsv, single .mbox, single
+    // discord-export json, single whatsapp txt) own their own
+    // record-emission loop and must intercept before the generic
+    // extract-then-chunk path. Otherwise a CSV picked up during a
+    // directory walk would still go through chunk_text and lose the
+    // header on every chunk past the first.
+    if let Some(kind) = archives::detect(path) {
+        let progress = progress::Progress::noop();
+        archives::ingest(kind, path, db, embedder, &progress)?;
+        return Ok(true);
+    }
+
     if !is_supported(&extension) {
         return Ok(false);
     }

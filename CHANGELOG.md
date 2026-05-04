@@ -1,5 +1,69 @@
 # Changelog
 
+## v2.4.2 — 2026-05-04
+
+### CSV / TSV: row-aware ingest, not "whole file as one chunk"
+
+A user reported that searching for a value inside an ingested CSV
+returned the entire file as a single result. The cause: csv/tsv files
+were going through the plain-text path (`extract_text` returned raw
+bytes, then `chunk_text(512, 64)` ran over them). Small CSVs collapsed
+to one chunk; larger ones lost the header on every chunk past the
+first. Either way the embedding had no idea what the columns meant.
+
+v2.4.2 adds a dedicated CSV/TSV archive handler that emits one
+`Record` per data row. Each record's body starts with a normalized
+header line (`csv: <filename> row N`) and then carries the column
+name / value pairs of that row, one per line:
+
+```
+csv: contacts.csv row 7
+
+name: Alice
+email: alice@example.com
+role: founder
+```
+
+That makes every chunk self-describing for both legs of hybrid
+retrieval: dense embeddings see "name: Alice" / "role: founder" as
+semantic anchors, and BM25 hits queries like "founder Alice" with
+the field name and value as adjacent tokens.
+
+Implementation:
+- `csv = "1"` added to `Cargo.toml` (small, well-maintained, brings
+  no new transitive deps beyond `serde` which is already in tree).
+- `src/ingest/archives/csv.rs` (new) with `detect` (case-insensitive
+  `.csv` / `.tsv`) and `ingest` (one record per row up to 10k rows;
+  groups of 50 rows beyond that to keep embedding cost bounded).
+- `archives::detect` and `archives::ingest` (`src/ingest/archives/mod.rs`)
+  pick up the new `ArchiveKind::Csv` variant for both top-level
+  ingest_path entries AND directory-walk hits.
+- `src/ingest/mod.rs::ingest_file` now calls `archives::detect`
+  before its plain-text path, so a directory of CSVs gets the same
+  row-aware treatment as a direct `satchel ingest data.csv`.
+
+Tests (12 new; 213 passing):
+- 9 unit tests in `csv.rs`: basic parse, quoted fields with embedded
+  commas, TSV tab delimiter, skips blank rows, empty file, header-only
+  file, flexible row widths, extension detection, case-insensitive
+  detection.
+- 3 integration tests in `tests/ingest_pipeline_test.rs`: one record
+  per row with header repeated and row-separation preserved, TSV uses
+  tab delimiter, directory walk picks up CSVs through the file-level
+  intercept.
+
+If you have CSVs already ingested under v2.4.1 or earlier, they are
+still in the database as the old single-blob chunks. To re-ingest
+under the new handler:
+
+```
+satchel delete --type csv      # also --type tsv if applicable
+satchel ingest <path>
+```
+
+Existing slack / mbox / discord / whatsapp / chatgpt / claude.ai
+archives are unaffected; this change only touches the CSV/TSV path.
+
 ## v2.4.1 — 2026-05-04
 
 ### Fresh deployment at a new path now creates a sibling vault (not the breadcrumb)
