@@ -358,7 +358,8 @@ mod chunking_tests {
             para = para
         );
         let chunks = chunk_archive_body(&body, 120);
-        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        let n = chunks.len();
+        assert!(n > 1, "expected multiple chunks, got {n}");
         for c in &chunks {
             assert!(
                 c.starts_with("slack: @alice in #design 2026-04-12\n"),
@@ -375,7 +376,11 @@ mod chunking_tests {
         assert!(chunks.len() > 1);
         // No header to repeat (body has no '\n'); each chunk is content only.
         let total_chars: usize = chunks.iter().map(|c| c.len()).sum();
-        assert!(total_chars >= body.len() - 1, "char count drift: {total_chars} vs {}", body.len());
+        let body_len = body.len();
+        assert!(
+            total_chars >= body_len - 1,
+            "char count drift: {total_chars} vs {body_len}"
+        );
     }
 
     #[test]
