@@ -14,6 +14,8 @@ pub struct SearchResult {
     pub chunk_id: String,
     pub text: String,
     pub source: String,
+    /// File type of the source document (`md`, `pdf`, `slack`, `csv`, ...).
+    pub file_type: String,
     pub score: f32,
     pub chunk_index: usize,
     pub tags: Vec<String>,
@@ -40,6 +42,25 @@ pub struct ChunkContext {
     pub source_path: String,
     pub chunk_index: usize,
     pub text: String,
+}
+
+/// Optional scoping knobs for `Database::search`. All fields default
+/// to `None`/empty, which preserves "search the whole vault" behavior.
+/// Built as a struct so we can extend the search API with new filters
+/// without breaking the call signature on every site (date range,
+/// reranker toggle, etc. are coming).
+#[derive(Default, Debug, Clone)]
+pub struct SearchOptions<'a> {
+    /// Substring match against `documents.source_path`.
+    pub filter_source: Option<&'a str>,
+    /// Restrict to chunks whose document carries any of these tags.
+    pub filter_tags: Option<&'a [&'a str]>,
+    /// Restrict to chunks whose document is in this collection.
+    pub filter_collection: Option<i64>,
+    /// Restrict to chunks whose document has this exact `file_type`
+    /// (e.g. `"md"`, `"pdf"`, `"slack"`, `"csv"`). Useful for "search
+    /// only my emails" or "search only my CSVs" queries.
+    pub filter_file_type: Option<&'a str>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -282,17 +303,24 @@ impl Database {
     ///
     /// `query_text` is what FTS5 tokenizes for keyword matching. Pass the same
     /// natural-language string the user typed; do not pre-tokenize.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// All scoping (source filter, tag filter, collection scope, file-type
+    /// scope) lives on [`SearchOptions`]. Pass `SearchOptions::default()`
+    /// for "search the whole vault."
     pub fn search(
         &self,
         query_embedding: &[f32],
         query_text: &str,
         limit: usize,
         offset: usize,
-        filter_source: Option<&str>,
-        filter_tags: Option<&[&str]>,
-        filter_collection: Option<i64>,
+        options: SearchOptions<'_>,
     ) -> Result<SearchPage> {
+        let SearchOptions {
+            filter_source,
+            filter_tags,
+            filter_collection,
+            filter_file_type,
+        } = options;
         let conn = self.conn.lock().unwrap();
 
         // Pre-resolve collection membership once. An empty collection (or a
@@ -324,7 +352,8 @@ impl Database {
         let dense: Vec<(String, f32)> = {
             let mut stmt = conn.prepare(
                 "SELECT c.id, c.text, d.source_path, d.id, c.chunk_index, c.embedding,
-                        COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags
+                        COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags,
+                        d.file_type
                  FROM chunks c
                  JOIN documents d ON d.id = c.document_id
                  LEFT JOIN tags t ON t.document_id = d.id
@@ -343,6 +372,7 @@ impl Database {
                         text: row.get(1)?,
                         source: row.get(2)?,
                         document_id: row.get(3)?,
+                        file_type: row.get(7)?,
                         chunk_index: row.get::<_, i64>(4)? as usize,
                         tags: row
                             .get::<_, String>(6)?
@@ -381,7 +411,8 @@ impl Database {
                      )
                      SELECT c.id, c.text, d.source_path, d.id, c.chunk_index,
                             COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags,
-                            fts.bm25 AS score
+                            fts.bm25 AS score,
+                            d.file_type
                      FROM fts
                      JOIN chunks c ON c.rowid = fts.rowid
                      JOIN documents d ON d.id = c.document_id
@@ -398,6 +429,7 @@ impl Database {
                             text: row.get(1)?,
                             source: row.get(2)?,
                             document_id: row.get(3)?,
+                            file_type: row.get(7)?,
                             chunk_index: row.get::<_, i64>(4)? as usize,
                             tags: row
                                 .get::<_, String>(5)?
@@ -445,6 +477,7 @@ impl Database {
                 chunk_id: fr.chunk_id,
                 text: fr.text,
                 source: fr.source,
+                file_type: fr.file_type,
                 score: fr.rrf,
                 chunk_index: fr.chunk_index,
                 tags: fr.tags,
@@ -457,6 +490,12 @@ impl Database {
         if let Some(tags) = filter_tags {
             fused.retain(|r| tags.iter().any(|t| r.tags.iter().any(|rt| rt == t)));
         }
+        if let Some(ft) = filter_file_type {
+            fused.retain(|r| r.file_type == ft);
+        }
+        // (filter_file_type is applied above against `r.file_type`,
+        // populated in the SELECT join so each chunk knows its
+        // document's file_type without a second query.)
 
         fused.sort_by(|a, b| {
             b.score
@@ -1237,6 +1276,7 @@ struct FusedRow {
     text: String,
     source: String,
     document_id: String,
+    file_type: String,
     chunk_index: usize,
     tags: Vec<String>,
     rrf: f32,
@@ -1458,7 +1498,7 @@ mod tests {
 
         let query = vec![1.0, 0.0, 0.0];
         let page = db
-            .search(&query, "chunk text", 5, 0, None, None, None)
+            .search(&query, "chunk text", 5, 0, SearchOptions::default())
             .unwrap();
         assert_eq!(page.results.len(), 1);
         assert_eq!(page.total, 1);
@@ -1669,7 +1709,16 @@ mod tests {
             .unwrap();
 
         let page = db
-            .search(&emb, "notes chunk", 10, 0, Some("/notes/"), None, None)
+            .search(
+                &emb,
+                "notes chunk",
+                10,
+                0,
+                SearchOptions {
+                    filter_source: Some("/notes/"),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(page.results.len(), 1);
         assert!(page.results[0].source.contains("/notes/"));
@@ -1682,7 +1731,7 @@ mod tests {
         let db = Database::open_memory().unwrap();
         let query = vec![1.0, 0.0, 0.0];
         let page = db
-            .search(&query, "anything", 5, 0, None, None, None)
+            .search(&query, "anything", 5, 0, SearchOptions::default())
             .unwrap();
         assert!(page.results.is_empty());
         assert_eq!(page.total, 0);
@@ -1707,12 +1756,23 @@ mod tests {
             .unwrap();
 
         // Unfiltered: both chunks come back.
-        let all = db.search(&emb, "shared", 10, 0, None, None, None).unwrap();
+        let all = db
+            .search(&emb, "shared", 10, 0, SearchOptions::default())
+            .unwrap();
         assert_eq!(all.results.len(), 2);
 
         // Scoped to the Work collection: only the work doc's chunk.
         let scoped = db
-            .search(&emb, "shared", 10, 0, None, None, Some(work))
+            .search(
+                &emb,
+                "shared",
+                10,
+                0,
+                SearchOptions {
+                    filter_collection: Some(work),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(scoped.results.len(), 1);
         assert!(scoped.results[0].source.contains("/work/"));
@@ -1720,7 +1780,16 @@ mod tests {
         // Empty collection (id with no members) returns zero, not an error.
         let empty = db.create_collection("Empty").unwrap();
         let none = db
-            .search(&emb, "shared", 10, 0, None, None, Some(empty))
+            .search(
+                &emb,
+                "shared",
+                10,
+                0,
+                SearchOptions {
+                    filter_collection: Some(empty),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(none.results.is_empty());
         assert_eq!(none.total, 0);
@@ -1742,7 +1811,16 @@ mod tests {
         db.add_tag("d1", "important").unwrap();
 
         let page = db
-            .search(&emb, "chunk", 10, 0, None, Some(&["important"]), None)
+            .search(
+                &emb,
+                "chunk",
+                10,
+                0,
+                SearchOptions {
+                    filter_tags: Some(&["important"]),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(page.results.len(), 1);
         assert!(page.results[0].source.contains("a.md"));
@@ -1846,7 +1924,7 @@ mod tests {
         }
 
         let page = db
-            .search(&query_emb, "lumencanvas", 5, 0, None, None, None)
+            .search(&query_emb, "lumencanvas", 5, 0, SearchOptions::default())
             .unwrap();
         assert!(
             page.results.iter().any(|r| r.text.contains("lumencanvas")),
@@ -1888,12 +1966,16 @@ mod tests {
             .unwrap();
         }
 
-        let p1 = db.search(&emb, "shared", 5, 0, None, None, None).unwrap();
+        let p1 = db
+            .search(&emb, "shared", 5, 0, SearchOptions::default())
+            .unwrap();
         assert_eq!(p1.results.len(), 5);
         assert_eq!(p1.total, 15);
         assert_eq!(p1.offset, 0);
 
-        let p2 = db.search(&emb, "shared", 5, 5, None, None, None).unwrap();
+        let p2 = db
+            .search(&emb, "shared", 5, 5, SearchOptions::default())
+            .unwrap();
         assert_eq!(p2.results.len(), 5);
         assert_eq!(p2.total, 15);
 
@@ -1905,7 +1987,9 @@ mod tests {
         }
 
         // Final page; offset past total returns empty without panic.
-        let p4 = db.search(&emb, "shared", 5, 100, None, None, None).unwrap();
+        let p4 = db
+            .search(&emb, "shared", 5, 100, SearchOptions::default())
+            .unwrap();
         assert!(p4.results.is_empty());
         assert_eq!(p4.total, 15);
     }
@@ -1955,9 +2039,10 @@ mod tests {
                 "target chunk",
                 5,
                 0,
-                Some("/target/"),
-                None,
-                None,
+                SearchOptions {
+                    filter_source: Some("/target/"),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert!(
@@ -2166,14 +2251,14 @@ mod tests {
             .unwrap();
 
         let page = db
-            .search(&[1.0], "uniqueword12345", 5, 0, None, None, None)
+            .search(&[1.0], "uniqueword12345", 5, 0, SearchOptions::default())
             .unwrap();
         assert_eq!(page.results.len(), 1);
 
         db.delete_by_path_exact("/a.md", false).unwrap();
 
         let page = db
-            .search(&[1.0], "uniqueword12345", 5, 0, None, None, None)
+            .search(&[1.0], "uniqueword12345", 5, 0, SearchOptions::default())
             .unwrap();
         assert!(
             page.results.is_empty(),
@@ -2259,6 +2344,90 @@ mod tests {
             .unwrap();
         assert!(records.is_empty());
         assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_search_filter_file_type_restricts_to_one_type() {
+        let db = Database::open_memory().unwrap();
+        // Three documents at different file types, all containing
+        // the word "alpha". Without a file-type filter all three
+        // come back; with `filter_file_type=Some("md")` only the
+        // markdown one does.
+        db.insert_document("d1", "/a.md", "md", None, "alpha", "h1")
+            .unwrap();
+        db.insert_document("d2", "/a.pdf", "pdf", None, "alpha", "h2")
+            .unwrap();
+        db.insert_document("d3", "/a.csv", "csv", None, "alpha row 1", "h3")
+            .unwrap();
+        let v = vec![1.0_f32; 2];
+        db.insert_chunk("d1:0", "d1", 0, "alpha hello md", 3, 0, 14, &v)
+            .unwrap();
+        db.insert_chunk("d2:0", "d2", 0, "alpha hello pdf", 3, 0, 15, &v)
+            .unwrap();
+        db.insert_chunk("d3:0", "d3", 0, "alpha hello csv", 3, 0, 15, &v)
+            .unwrap();
+
+        let all = db
+            .search(&v, "alpha", 10, 0, SearchOptions::default())
+            .unwrap();
+        assert_eq!(all.total, 3);
+
+        let only_md = db
+            .search(
+                &v,
+                "alpha",
+                10,
+                0,
+                SearchOptions {
+                    filter_file_type: Some("md"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(only_md.total, 1);
+        assert!(only_md.results[0].source.ends_with(".md"));
+        assert_eq!(only_md.results[0].file_type, "md");
+    }
+
+    #[test]
+    fn test_search_filter_file_type_unknown_returns_empty() {
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.md", "md", None, "alpha", "h1")
+            .unwrap();
+        let v = vec![1.0_f32; 2];
+        db.insert_chunk("d1:0", "d1", 0, "alpha hello", 2, 0, 11, &v)
+            .unwrap();
+        let page = db
+            .search(
+                &v,
+                "alpha",
+                10,
+                0,
+                SearchOptions {
+                    filter_file_type: Some("nosuchtype"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total, 0);
+    }
+
+    #[test]
+    fn test_search_result_carries_file_type() {
+        // Regression guard: if we drop the file_type from FusedRow or
+        // from the SELECT join, this test fails noisily before any
+        // user-facing surface (UI, MCP) starts showing empty types.
+        let db = Database::open_memory().unwrap();
+        db.insert_document("d1", "/a.csv", "csv", None, "alpha", "h1")
+            .unwrap();
+        let v = vec![1.0_f32; 2];
+        db.insert_chunk("d1:0", "d1", 0, "alpha hello", 2, 0, 11, &v)
+            .unwrap();
+        let page = db
+            .search(&v, "alpha", 10, 0, SearchOptions::default())
+            .unwrap();
+        assert_eq!(page.results.len(), 1);
+        assert_eq!(page.results[0].file_type, "csv");
     }
 
     #[test]

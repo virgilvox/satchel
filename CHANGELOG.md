@@ -1,5 +1,52 @@
 # Changelog
 
+## v2.5.0 — 2026-05-04
+
+### Chat-side collection scope picker
+
+The Chat tab gains a sticky scope chip row above the message input,
+the same `CollectionScope` UI the Search and Ask tabs already use. Pick
+"ALL" (whole vault) or any named collection. The selection persists to
+localStorage, survives reloads, and **auto-injects `collection_name`
+into every `search_knowledge` call the LLM makes** unless the LLM
+explicitly passes its own `collection_name` / `collection_id` (then
+the LLM's choice wins; this lets a model still cross-collection search
+when the user asks).
+
+Why: smaller models routinely forget to pass `collection_name` even
+when the user has clearly framed the question as scoped. Up to
+v2.4.x the user had to either trust the model to remember or repeat
+the collection name in every prompt. Now scope is a UI affordance the
+user sets once and forgets.
+
+### `filter_file_type` on `search_knowledge` + REST search
+
+The `search_knowledge` MCP tool gains a `filter_file_type` argument:
+restrict results to documents of a specific type (`md`, `pdf`, `csv`,
+`slack`, `mbox`, `tsv`, `json`, etc.). The same field is on
+`POST /api/search`. `SearchResult` now carries `file_type` per
+result so callers can render type badges without a second query.
+
+### Internal: `SearchOptions` refactor
+
+`Database::search` had a 7-positional-arg signature flagged with
+`#[allow(clippy::too_many_arguments)]`. Replaced with a single
+`SearchOptions<'_>` struct that defaults to "search the whole vault"
+and exposes named fields: `filter_source`, `filter_tags`,
+`filter_collection`, `filter_file_type`. All 16 call sites updated
+across production code and tests; future filter knobs (date ranges,
+reranker toggle, contextual-retrieval mode) slot in here without
+breaking the call signature.
+
+### Tests + verification
+
+- 3 new unit tests covering `filter_file_type` (single-type
+  restriction, unknown-type returns empty, `SearchResult.file_type`
+  populated).
+- 219 tests pass (was 216).
+- `cargo fmt --check`, `cargo clippy -D warnings`, release build all
+  clean. Web bundle rebuilt.
+
 ## v2.4.3 — 2026-05-04
 
 ### See through macOS App Translocation; fresh deploys now actually get fresh vaults

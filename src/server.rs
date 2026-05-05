@@ -15,7 +15,7 @@ use crate::embed::Embedder;
 use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::mcp_proxy::{self, McpServerEntry, McpServersConfig};
-use crate::rag::Database;
+use crate::rag::{self, Database};
 use crate::release::ReleaseCache;
 use crate::tunnel::{TunnelConfig, TunnelManager, TunnelMode};
 use axum::body::Body;
@@ -368,6 +368,8 @@ struct SearchRequest {
     filter_source: Option<String>,
     /// Restrict results to chunks whose document is in this collection.
     collection_id: Option<i64>,
+    /// Restrict to a single file type (e.g. `"md"`, `"csv"`, `"slack"`).
+    filter_file_type: Option<String>,
 }
 
 async fn api_search(
@@ -387,9 +389,12 @@ async fn api_search(
         &req.query,
         limit,
         offset,
-        req.filter_source.as_deref(),
-        None,
-        req.collection_id,
+        rag::SearchOptions {
+            filter_source: req.filter_source.as_deref(),
+            filter_collection: req.collection_id,
+            filter_file_type: req.filter_file_type.as_deref(),
+            ..Default::default()
+        },
     ) {
         Ok(page) => Json(json!({
             "results": page.results,

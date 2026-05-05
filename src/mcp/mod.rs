@@ -52,12 +52,16 @@ pub fn tool_definitions() -> Value {
                         },
                         "filter_source": {
                             "type": "string",
-                            "description": "Filter results to a specific source file"
+                            "description": "Substring match on source_path. Use to scope to a folder or filename, e.g. \"slack/\" or \"meeting-notes\"."
                         },
                         "filter_tags": {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Filter results to chunks with any of these tags"
+                        },
+                        "filter_file_type": {
+                            "type": "string",
+                            "description": "Restrict results to documents of this exact file type (e.g. 'md', 'pdf', 'csv', 'slack', 'mbox', 'tsv', 'json'). Use list_sources to discover the file types in this vault."
                         },
                         "collection_name": {
                             "type": "string",
@@ -257,14 +261,19 @@ async fn handle_search(args: &Value, db: &Database, embedder: &Embedder) -> Valu
         Err(e) => return tool_error(&format!("Embedding error: {e}")),
     };
 
+    let filter_file_type = args["filter_file_type"].as_str();
+    let tag_refs: Option<Vec<&str>> = filter_tags.as_ref().map(|v| v.to_vec());
     let page = match db.search(
         &query_embedding,
         query,
         top_k,
         0,
-        filter_source,
-        filter_tags.as_deref(),
-        filter_collection,
+        crate::rag::SearchOptions {
+            filter_source,
+            filter_tags: tag_refs.as_deref(),
+            filter_collection,
+            filter_file_type,
+        },
     ) {
         Ok(r) => r,
         Err(e) => return tool_error(&format!("Search error: {e}")),

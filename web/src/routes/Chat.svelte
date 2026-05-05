@@ -21,6 +21,8 @@
     parseConstrainedOutput,
   } from '../lib/agent';
   import { McpClient } from '../lib/mcp';
+  import CollectionScope from '../components/CollectionScope.svelte';
+  import { api } from '../lib/api';
   import { settings, chatSettings } from '../lib/stores.svelte';
   import type { ChatMessage, McpTool, ToolCallResult } from '../lib/types';
   import {
@@ -74,6 +76,22 @@
     window: 0,
   });
   let contextFull = $state(false);
+
+  // Auto-inject the user's chosen collection scope into search_knowledge
+  // tool calls. The LLM is allowed to override (if it explicitly passes
+  // collection_name or collection_id, we keep its choice). For "whole
+  // vault" (chatScopeName === ''), we pass through unchanged.
+  function applyScopeToToolArgs(
+    name: string,
+    args: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (name !== 'search_knowledge') return args;
+    const scope = chatSettings.chatScopeName;
+    if (!scope) return args;
+    if (typeof args.collection_name === 'string' && args.collection_name) return args;
+    if (typeof args.collection_id === 'number') return args;
+    return { ...args, collection_name: scope };
+  }
 
   // Cumulative Anthropic prompt-cache hit count for the current chat.
   // Incremented after each successful turn from
@@ -458,7 +476,7 @@
       scrollToBottom();
 
       try {
-        const out = await mcp.callTool(call.name, call.args);
+        const out = await mcp.callTool(call.name, applyScopeToToolArgs(call.name, call.args));
         transcript = transcript.map((m) =>
           m.id !== aId || !m.toolCalls
             ? m
@@ -667,7 +685,7 @@
 
       for (const tu of result.toolUses) {
         try {
-          const out = await mcp.callTool(tu.name, tu.input);
+          const out = await mcp.callTool(tu.name, applyScopeToToolArgs(tu.name, tu.input));
           transcript = transcript.map((m2) =>
             m2.id !== aId || !m2.toolCalls
               ? m2
@@ -831,6 +849,28 @@
     {/if}
   </div>
 </div>
+
+<CollectionScope
+  value={chatSettings.chatScopeId}
+  onchange={async (id) => {
+    if (id === '') {
+      chatSettings.setChatScope('', '');
+      return;
+    }
+    // Resolve the chosen id to its display name so we can pass
+    // `collection_name` (the user-facing identifier) to
+    // `search_knowledge`. One small REST round-trip per change.
+    try {
+      const r = await api.collectionsList();
+      const found = (r.collections ?? []).find((c) => c.id === id);
+      if (found) chatSettings.setChatScope(id, found.name);
+    } catch {
+      // Network blip; keep the id but blank the name. The next chat
+      // turn will fall back to "whole vault" which is a safe default.
+      chatSettings.setChatScope(id, '');
+    }
+  }}
+/>
 
 {#if contextFull}
   <div class="ctx-banner">

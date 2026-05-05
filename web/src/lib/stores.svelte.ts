@@ -100,6 +100,11 @@ const CHAT_KEYS = {
   anthropicMaxTokens: 'satchel-chat-anthropic-max-tokens',
   anthropicCaching: 'satchel-chat-anthropic-caching',
   anthropicSystemPrompt: 'satchel-chat-anthropic-system',
+  // Chat scope: which collection (if any) is auto-injected into every
+  // `search_knowledge` call. Persisted as collection id; empty string
+  // means "search the whole vault."
+  chatScopeCollectionId: 'satchel-chat-scope-collection-id',
+  chatScopeCollectionName: 'satchel-chat-scope-collection-name',
 };
 
 export type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -208,6 +213,16 @@ class ChatSettingsStore {
   anthropicMaxTokens = $state(readNumber(CHAT_KEYS.anthropicMaxTokens, 16000));
   anthropicCaching = $state(readBool(CHAT_KEYS.anthropicCaching, true));
   anthropicSystemPrompt = $state(safeGet(CHAT_KEYS.anthropicSystemPrompt) ?? DEFAULT_ANTHROPIC_SYSTEM);
+  // Chat scope. `chatScopeId` is `''` for "whole vault" or a numeric
+  // collection id. `chatScopeName` is the display label (also used as
+  // the value passed to `search_knowledge`'s `collection_name` arg —
+  // collection names are the user-facing identifier).
+  chatScopeId = $state<number | ''>(
+    safeGet(CHAT_KEYS.chatScopeCollectionId)
+      ? Number(safeGet(CHAT_KEYS.chatScopeCollectionId))
+      : ''
+  );
+  chatScopeName = $state<string>(safeGet(CHAT_KEYS.chatScopeCollectionName) ?? '');
 
   setTemperature(v: number) { this.temperature = v; safeSet(CHAT_KEYS.temperature, String(v)); }
   setMaxTokens(v: number) { this.maxTokens = v; safeSet(CHAT_KEYS.maxTokens, String(v)); }
@@ -224,6 +239,15 @@ class ChatSettingsStore {
   setAnthropicCaching(v: boolean) { this.anthropicCaching = v; safeSet(CHAT_KEYS.anthropicCaching, v ? '1' : '0'); }
   setAnthropicSystemPrompt(v: string) { this.anthropicSystemPrompt = v; safeSet(CHAT_KEYS.anthropicSystemPrompt, v); }
   resetAnthropicSystemPrompt() { this.setAnthropicSystemPrompt(DEFAULT_ANTHROPIC_SYSTEM); }
+  /** Set chat scope to a specific collection or back to "whole vault"
+   *  (id = '', name = ''). Both fields update together so the picker UI
+   *  stays consistent with what we send to `search_knowledge`. */
+  setChatScope(id: number | '', name: string) {
+    this.chatScopeId = id;
+    this.chatScopeName = name;
+    safeSet(CHAT_KEYS.chatScopeCollectionId, id === '' ? '' : String(id));
+    safeSet(CHAT_KEYS.chatScopeCollectionName, name);
+  }
 }
 
 class SettingsStore {
