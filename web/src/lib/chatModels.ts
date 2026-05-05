@@ -11,6 +11,14 @@ import { MODELS as WEBLLM_MODELS, type ModelOption } from './webllm';
 
 export type ChatModelBackend = 'webllm' | 'anthropic';
 
+export interface ChatModelPricing {
+  /** Dollars per 1,000,000 input tokens. Cache writes are 1.25× this
+   *  (5-min TTL); cache reads are 0.1× this. */
+  inputPerMillion: number;
+  /** Dollars per 1,000,000 output tokens. */
+  outputPerMillion: number;
+}
+
 export interface ChatModel {
   /** Stable id used in the picker + persisted to localStorage. For
    *  WebLLM models this matches @mlc-ai/web-llm's prebuilt id; for
@@ -24,6 +32,9 @@ export interface ChatModel {
   size: string;
   backend: ChatModelBackend;
   notes?: string;
+  /** Public per-token pricing for cost-meter display. Anthropic-only;
+   *  WebLLM is always free at runtime. */
+  pricing?: ChatModelPricing;
 }
 
 const ANTHROPIC_MODELS: ChatModel[] = [
@@ -34,6 +45,7 @@ const ANTHROPIC_MODELS: ChatModel[] = [
     size: 'API',
     backend: 'anthropic',
     notes: 'Most capable. Anthropic API key required (Settings → Anthropic API).',
+    pricing: { inputPerMillion: 5, outputPerMillion: 25 },
   },
   {
     id: 'claude-sonnet-4-6',
@@ -42,6 +54,7 @@ const ANTHROPIC_MODELS: ChatModel[] = [
     size: 'API',
     backend: 'anthropic',
     notes: 'Balanced. Strong tool use; faster than Opus.',
+    pricing: { inputPerMillion: 3, outputPerMillion: 15 },
   },
   {
     id: 'claude-haiku-4-5',
@@ -50,6 +63,7 @@ const ANTHROPIC_MODELS: ChatModel[] = [
     size: 'API',
     backend: 'anthropic',
     notes: 'Fastest, cheapest. Good for quick lookups.',
+    pricing: { inputPerMillion: 1, outputPerMillion: 5 },
   },
 ];
 

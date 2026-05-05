@@ -311,3 +311,19 @@ export async function setAnthropicKey(key: string): Promise<{ ok: boolean; error
 export async function clearAnthropicKey(): Promise<void> {
   await fetch('/api/anthropic/config', { method: 'DELETE' });
 }
+
+/** Validate the currently-saved Anthropic API key by issuing a minimal
+ *  5-output-token request against claude-haiku-4-5. Returns `{ok: true}`
+ *  on success or `{ok: false, error}` on any failure. The check pings
+ *  through the same /api/anthropic proxy path the chat uses, so a green
+ *  result here also confirms the proxy is reachable end-to-end. */
+export async function testAnthropicKey(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const r = await fetch('/api/anthropic/test', { method: 'POST' });
+    const j = (await r.json()) as { ok?: boolean; error?: string };
+    if (j.ok) return { ok: true };
+    return { ok: false, error: j.error || 'unknown error' };
+  } catch (e) {
+    return { ok: false, error: errMessage(e) };
+  }
+}

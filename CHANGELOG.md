@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.6.0 — 2026-05-04
+
+### Anthropic API key validation button
+
+The Settings → Cloud tab adds a TEST button next to SAVE KEY. Click
+it to issue a minimal 5-output-token request against
+`claude-haiku-4-5` through the same `/api/anthropic` proxy the chat
+uses. A green check confirms the key + proxy round-trip works; a red
+chip shows Anthropic's actual error message inline (`401 invalid x-api-key`,
+`404 not_found_error`, etc.) so typos and revoked keys surface
+immediately on save instead of on first chat use.
+
+New endpoint `POST /api/anthropic/test`. Stateless, single-shot, no
+streaming, doesn't pollute the chat session.
+
+### Cost meter pill in chat header
+
+Anthropic chat sessions now track cumulative dollar cost across turns
+and surface it as a pill in the chat strip next to the cache-hit pill.
+Calculation matches Anthropic's published rates:
+
+- regular input tokens × `inputPerMillion`
+- cache-write tokens × `inputPerMillion` × 1.25 (5-min TTL)
+- cache-read tokens × `inputPerMillion` × 0.1
+- output tokens × `outputPerMillion`
+
+Pricing per model (as of 2026-05-04):
+
+| Model | Input $/M | Output $/M |
+|---|---|---|
+| Opus 4.7 | $5 | $25 |
+| Sonnet 4.6 | $3 | $15 |
+| Haiku 4.5 | $1 | $5 |
+
+Pill formats `$0.0042` for sub-cent costs and `$1.42` once you cross
+a cent. Resets on `Clear Chat`. WebLLM sessions don't show the pill
+(local inference, no per-token cost).
+
+Pricing data lives in `web/src/lib/chatModels.ts` next to the model
+list, so adding a new model means filling in one struct.
+
+### Tests + verification
+
+- All 225 tests pass (no new tests; both features are UI + a one-shot
+  endpoint).
+- `cargo fmt --check`, `cargo clippy -D warnings`, release build all
+  clean.
+- Web bundle rebuilt.
+
 ## v2.5.1 — 2026-05-04
 
 ### Token-bounded sub-chunking for oversize archive records

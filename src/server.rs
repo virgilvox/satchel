@@ -94,6 +94,7 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
                 .delete(api_anthropic_config_clear),
         )
         .route("/api/anthropic/messages", post(api_anthropic_messages))
+        .route("/api/anthropic/test", post(api_anthropic_test))
         .route(
             "/api/mcp/servers",
             get(api_mcp_servers_list).post(api_mcp_servers_upsert),
@@ -987,6 +988,60 @@ async fn api_anthropic_config_clear(State(state): State<Arc<AppState>>) -> Json<
     match AnthropicConfig::clear(&state.vault_path) {
         Ok(_) => Json(json!({ "configured": false })),
         Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+/// Validate the saved Anthropic API key by issuing a minimal,
+/// 5-output-token request to claude-haiku-4-5. Returns
+/// `{ok: true, model: "..."}` on success or
+/// `{ok: false, status: <code>, error: "..."}` on any failure.
+/// Distinct from `/api/anthropic/messages` (which streams a full chat
+/// turn and is gated on the key already being good); this is a
+/// single-shot health check the Settings UI can use to surface key
+/// errors immediately on save instead of on first chat use.
+async fn api_anthropic_test(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cfg = match AnthropicConfig::load(&state.vault_path) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Json(json!({
+                "ok": false,
+                "error": "No API key configured. Save a key first."
+            }));
+        }
+        Err(e) => {
+            return Json(json!({"ok": false, "error": format!("config load: {e}")}));
+        }
+    };
+    let probe_body = json!({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 5,
+        "stream": false,
+        "messages": [{"role": "user", "content": "ok"}]
+    });
+    match anthropic::proxy_messages(&cfg.api_key, probe_body).await {
+        Ok(res) => {
+            let status = res.status();
+            if status.is_success() {
+                Json(json!({"ok": true, "model": "claude-haiku-4-5"}))
+            } else {
+                let body = res.text().await.unwrap_or_default();
+                let detail = match serde_json::from_str::<Value>(&body) {
+                    Ok(v) => v
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or(&body)
+                        .to_string(),
+                    Err(_) => body,
+                };
+                Json(json!({
+                    "ok": false,
+                    "status": status.as_u16(),
+                    "error": detail
+                }))
+            }
+        }
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
     }
 }
 

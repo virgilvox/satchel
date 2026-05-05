@@ -37,6 +37,7 @@
     type AnthropicMessage,
     type AnthropicTool,
     type AnthropicContentBlock,
+    type AnthropicUsage,
   } from '../lib/anthropic';
   import { errMessage } from '../lib/errors';
 
@@ -98,6 +99,25 @@
   // `result.usage.cache_read_input_tokens`. Displayed as a pill so the
   // user can see caching is paying off.
   let cacheReadTokens = $state(0);
+  // Estimated cumulative dollar cost for the current chat session.
+  // Updated after each successful Anthropic turn from `result.usage`
+  // and the active model's published per-token pricing. Reset by
+  // clearChat. WebLLM turns contribute nothing.
+  let sessionCost = $state(0);
+
+  /** Add a turn's `result.usage` to the running session-cost meter. */
+  function accumulateCost(modelId: string, usage: AnthropicUsage) {
+    const model = findChatModel(modelId);
+    if (!model?.pricing) return;
+    const { inputPerMillion: pIn, outputPerMillion: pOut } = model.pricing;
+    const turn =
+      ((usage.input_tokens ?? 0) * pIn +
+        (usage.cache_creation_input_tokens ?? 0) * pIn * 1.25 +
+        (usage.cache_read_input_tokens ?? 0) * pIn * 0.1 +
+        (usage.output_tokens ?? 0) * pOut) /
+      1_000_000;
+    sessionCost += turn;
+  }
 
   // ---- Settings modal (rail removed in v1.4.0) ----
   let settingsOpen = $state(false);
@@ -305,6 +325,8 @@
     transcript = [];
     lastUsage = { prompt: 0, total: 0, window: lastUsage.window };
     contextFull = false;
+    cacheReadTokens = 0;
+    sessionCost = 0;
     try {
       localStorage.removeItem(TRANSCRIPT_KEY);
     } catch {}
@@ -649,10 +671,13 @@
         return;
       }
 
-      // Track cumulative cache hits across the chat session.
+      // Track cumulative cache hits AND dollar cost across the chat
+      // session. accumulateCost is a no-op for models without published
+      // pricing (e.g. WebLLM models, future models we haven't priced).
       if (result.usage.cache_read_input_tokens) {
         cacheReadTokens += result.usage.cache_read_input_tokens;
       }
+      accumulateCost(m.id, result.usage);
 
       // No tool calls? Final answer; finalize and exit.
       if (result.toolUses.length === 0) {
@@ -838,6 +863,12 @@
       <Pill tone="teal">
         <Dot tone="teal" />
         <span class="pill-text" title="Tokens served from prompt cache this chat">cache {cacheReadTokens.toLocaleString()}t</span>
+      </Pill>
+    {/if}
+    {#if liveBackend === 'anthropic' && sessionCost > 0}
+      <Pill tone="neutral">
+        <Dot tone="dim" />
+        <span class="pill-text" title="Estimated cost this chat (input + output + cache, at the active model's published rate)">${sessionCost < 0.01 ? sessionCost.toFixed(4) : sessionCost.toFixed(2)}</span>
       </Pill>
     {/if}
   </div>

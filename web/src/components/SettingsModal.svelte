@@ -14,6 +14,7 @@
     getAnthropicConfigured,
     setAnthropicKey,
     clearAnthropicKey,
+    testAnthropicKey,
   } from '../lib/anthropic';
   import {
     listMcpServers,
@@ -103,9 +104,21 @@
   let anthropicKey = $state(''); // form field; never round-tripped from server
   let anthropicSaving = $state(false);
   let anthropicError: string | undefined = $state(undefined);
+  // Validation result for the "Test" button. `null` means no test has
+  // been run yet this session; `{ok: true}` shows the green chip;
+  // `{ok: false, error}` shows the red chip with the message.
+  let anthropicTestResult = $state<null | { ok: boolean; error?: string }>(null);
+  let anthropicTesting = $state(false);
 
   async function refreshAnthropic() {
     anthropicConfigured = await getAnthropicConfigured();
+  }
+  async function testAnthropic() {
+    if (anthropicTesting) return;
+    anthropicTesting = true;
+    anthropicTestResult = null;
+    anthropicTestResult = await testAnthropicKey();
+    anthropicTesting = false;
   }
   async function saveAnthropic() {
     if (anthropicSaving || !anthropicKey.trim()) return;
@@ -239,9 +252,23 @@
           disabled={anthropicSaving || !anthropicKey.trim()}>
           {anthropicSaving ? 'SAVING…' : (anthropicConfigured ? 'REPLACE KEY' : 'SAVE KEY')}
         </button>
+        {#if anthropicConfigured}
+          <button class="btn btn-secondary btn-sm" type="button"
+            onclick={testAnthropic}
+            disabled={anthropicTesting}>
+            {anthropicTesting ? 'TESTING…' : 'TEST'}
+          </button>
+        {/if}
         <a class="link" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">get a key →</a>
       </div>
       {#if anthropicError}<p class="err">{anthropicError}</p>{/if}
+      {#if anthropicTestResult}
+        {#if anthropicTestResult.ok}
+          <p class="ok">✓ Key works · claude-haiku-4-5 reachable</p>
+        {:else}
+          <p class="err">✗ {anthropicTestResult.error ?? 'unknown error'}</p>
+        {/if}
+      {/if}
 
       <!-- ============ Generation (API mode) ============ -->
       <div class="section-label">GENERATION</div>
@@ -710,6 +737,7 @@
   }
 
   .err { color: var(--danger); font-size: 11px; margin: 0; }
+  .ok { color: var(--teal); font-size: 11px; margin: 0; }
   .link {
     color: var(--teal);
     font-size: 10px;
