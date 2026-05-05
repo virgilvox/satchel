@@ -134,9 +134,23 @@ pub fn ingest(
     }
 }
 
-/// Persist a single record: insert document, embed body, insert single chunk.
-/// Skips if a document with the same source_path already exists with same
-/// record_id-derived hash. Emits a `RecordAdded` or `RecordSkipped` event.
+/// Soft cap for the per-chunk text size when sub-chunking oversize
+/// archive records. The default embedder (`bge-small-en-v1.5`) has a
+/// 512-token context; we leave headroom for the repeated header line
+/// and a few special tokens. Anything larger gets silently truncated
+/// by the embedder, which is exactly the bug v2.5.1 fixes.
+const ARCHIVE_CHUNK_MAX_TOKENS: usize = 480;
+
+/// Persist a single record. The full body is stored as one row in
+/// `documents`; the body may be split into multiple `chunks` rows when
+/// it exceeds the embedder's effective context. Each sub-chunk
+/// preserves the record's normalized header line so search hits in
+/// the middle of a long thread / email / conversation still surface
+/// who/when/where without a second query.
+///
+/// Skips entirely if a document with the same hash already exists
+/// (idempotent on re-ingest). Emits a `RecordAdded` or `RecordSkipped`
+/// event.
 pub(crate) fn persist_record(
     record: &Record,
     file_type: &str,
@@ -166,17 +180,235 @@ pub(crate) fn persist_record(
         &sha256,
     )?;
 
-    let embedding = embedder.embed_with_info(&record.body)?;
-    db.insert_chunk(
-        &format!("{doc_id}:0"),
-        &doc_id,
-        0,
-        &record.body,
-        embedding.token_count,
-        0,
-        record.body.len(),
-        &embedding.vector,
-    )?;
+    // Sub-chunk if the body is too long for the embedder's context.
+    // Short bodies still produce exactly one chunk (current behavior
+    // preserved for everything that already fits).
+    let chunks = chunk_archive_body(&record.body, ARCHIVE_CHUNK_MAX_TOKENS);
+    for (i, chunk_text) in chunks.iter().enumerate() {
+        let embedding = embedder.embed_with_info(chunk_text)?;
+        db.insert_chunk(
+            &format!("{doc_id}:{i}"),
+            &doc_id,
+            i,
+            chunk_text,
+            embedding.token_count,
+            0,
+            chunk_text.len(),
+            &embedding.vector,
+        )?;
+    }
     progress.emit(ProgressEvent::RecordAdded);
     Ok(true)
+}
+
+/// Split an archive record's body into one or more chunks each under
+/// `max_tokens`. The first non-empty line ending in `\n` is treated
+/// as the record's header (e.g. `csv: file.csv row 7`,
+/// `slack: @alice in #design 2026-04-12`) and is repeated at the top
+/// of every emitted chunk so each chunk is self-describing.
+///
+/// Splitting strategy: paragraph (`\n\n`) → line (`\n`) → hard char
+/// wrap. Always returns at least one chunk; for bodies under the
+/// threshold the result is `vec![body.to_string()]` (no header
+/// repetition needed since there's only one piece).
+pub(crate) fn chunk_archive_body(body: &str, max_tokens: usize) -> Vec<String> {
+    if body.is_empty() {
+        return vec![String::new()];
+    }
+    if crate::ingest::approximate_tokens(body) <= max_tokens {
+        return vec![body.to_string()];
+    }
+
+    // Identify the header line: first '\n'. Everything before (and
+    // including) the newline is the header; everything after is body
+    // content. If the body has no newline at all, treat all of it as
+    // content with no header.
+    let (header, content) = match body.find('\n') {
+        Some(i) => (&body[..=i], &body[i + 1..]),
+        None => ("", body),
+    };
+
+    let header_tokens = crate::ingest::approximate_tokens(header);
+    let slice_budget = max_tokens.saturating_sub(header_tokens).max(1);
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    let push_current = |chunks: &mut Vec<String>, current: &mut String| {
+        if !current.is_empty() {
+            let mut chunk = String::with_capacity(header.len() + current.len());
+            chunk.push_str(header);
+            chunk.push_str(current.trim_end());
+            chunks.push(chunk);
+            current.clear();
+        }
+    };
+
+    for paragraph in content.split("\n\n") {
+        if paragraph.trim().is_empty() {
+            continue;
+        }
+        let p_tokens = crate::ingest::approximate_tokens(paragraph);
+        let cur_tokens = crate::ingest::approximate_tokens(&current);
+
+        if cur_tokens + p_tokens + 1 > slice_budget {
+            push_current(&mut chunks, &mut current);
+            if p_tokens > slice_budget {
+                // The single paragraph itself overflows; split it
+                // line-by-line, falling back to char-wrap inside lines.
+                for sub in split_oversized(paragraph, slice_budget) {
+                    let mut chunk = String::with_capacity(header.len() + sub.len());
+                    chunk.push_str(header);
+                    chunk.push_str(&sub);
+                    chunks.push(chunk);
+                }
+                continue;
+            }
+        }
+
+        if !current.is_empty() {
+            current.push_str("\n\n");
+        }
+        current.push_str(paragraph);
+    }
+    push_current(&mut chunks, &mut current);
+
+    if chunks.is_empty() {
+        chunks.push(body.to_string());
+    }
+    chunks
+}
+
+fn split_oversized(text: &str, budget_tokens: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for line in text.lines() {
+        let cur_tokens = crate::ingest::approximate_tokens(&current);
+        let line_tokens = crate::ingest::approximate_tokens(line);
+
+        if cur_tokens + line_tokens + 1 > budget_tokens {
+            if !current.is_empty() {
+                out.push(current.trim_end().to_string());
+                current.clear();
+            }
+            if line_tokens > budget_tokens {
+                // Hard char-wrap; respect UTF-8 boundaries so we
+                // never produce invalid strings.
+                let chars_per_chunk = (budget_tokens.saturating_mul(4)).max(1);
+                let mut start = 0;
+                while start < line.len() {
+                    let target = (start + chars_per_chunk).min(line.len());
+                    let safe_end = (start..=target)
+                        .rev()
+                        .find(|&i| line.is_char_boundary(i))
+                        .unwrap_or(target);
+                    if safe_end <= start {
+                        break;
+                    }
+                    out.push(line[start..safe_end].to_string());
+                    start = safe_end;
+                }
+                continue;
+            }
+        }
+
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        out.push(current.trim_end().to_string());
+    }
+    if out.is_empty() {
+        out.push(text.to_string());
+    }
+    out
+}
+
+#[cfg(test)]
+mod chunking_tests {
+    use super::*;
+
+    #[test]
+    fn under_threshold_returns_single_chunk_unchanged() {
+        let body = "csv: file.csv row 1\n\nname: Alice\nemail: a@b.com";
+        let chunks = chunk_archive_body(body, 480);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], body);
+    }
+
+    #[test]
+    fn empty_body_returns_one_empty_chunk() {
+        let chunks = chunk_archive_body("", 480);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "");
+    }
+
+    #[test]
+    fn oversize_body_splits_on_paragraph_boundaries_with_header_repeated() {
+        let header = "slack: @alice in #design 2026-04-12\n";
+        // ~100 tokens per paragraph (400 chars / 4), 4 paragraphs.
+        // With max_tokens=120 we should get multiple chunks.
+        let para = "x".repeat(400);
+        let body = format!(
+            "{header}\n{para}\n\n{para}\n\n{para}\n\n{para}",
+            header = header,
+            para = para
+        );
+        let chunks = chunk_archive_body(&body, 120);
+        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        for c in &chunks {
+            assert!(
+                c.starts_with("slack: @alice in #design 2026-04-12\n"),
+                "every sub-chunk must start with the header line; got:\n{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_with_no_newline_chunks_anyway() {
+        // Long single line, no header. Hard char-wrap fallback.
+        let body = "a".repeat(5000);
+        let chunks = chunk_archive_body(&body, 50);
+        assert!(chunks.len() > 1);
+        // No header to repeat (body has no '\n'); each chunk is content only.
+        let total_chars: usize = chunks.iter().map(|c| c.len()).sum();
+        assert!(total_chars >= body.len() - 1, "char count drift: {total_chars} vs {}", body.len());
+    }
+
+    #[test]
+    fn header_token_budget_respected() {
+        // Big header + medium body. Each chunk's slice budget should
+        // be (max - header_tokens), so even a body that fits in
+        // `max_tokens` raw could need splitting after header overhead
+        // is accounted for.
+        let header = format!("{}\n", "h".repeat(800)); // ~200 tokens of header
+        let body = format!("{}{}", header, "x".repeat(2000));
+        let chunks = chunk_archive_body(&body, 250);
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(c.starts_with(&header));
+        }
+    }
+
+    #[test]
+    fn splits_at_message_boundaries_in_chat_data() {
+        // Slack-style body with multiple messages separated by blanks.
+        let body = "\
+slack: #general 2026-04-12\n\n\
+[12:01] alice: hey have we shipped the v2 api yet\n\n\
+[12:03] bob: nope, still blocked on auth\n\n\
+[12:04] alice: lol perfect timing then\n\n\
+[12:05] bob: you have no idea\n\n\
+[12:10] alice: ok i'll move it to next sprint\n\n\
+[12:11] bob: appreciate it";
+        // Force splitting with a small budget.
+        let chunks = chunk_archive_body(body, 30);
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(c.starts_with("slack: #general 2026-04-12\n"));
+        }
+    }
 }

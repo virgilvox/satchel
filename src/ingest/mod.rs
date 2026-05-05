@@ -462,7 +462,7 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<Chunk> {
     chunks
 }
 
-fn approximate_tokens(text: &str) -> usize {
+pub(crate) fn approximate_tokens(text: &str) -> usize {
     text.len() / 4
 }
 

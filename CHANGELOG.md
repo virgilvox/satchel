@@ -1,5 +1,49 @@
 # Changelog
 
+## v2.5.1 — 2026-05-04
+
+### Token-bounded sub-chunking for oversize archive records
+
+Until now, every archive record (Slack thread, mbox email, ChatGPT
+conversation, CSV row, Discord export message, ...) was inserted as
+exactly one document with one chunk. Records longer than the embedder's
+context window (`bge-small-en-v1.5` = 512 tokens) had their tail
+silently truncated by the tokenizer when the embedding was computed.
+A 50-message Slack thread, a long email, or a dense AI conversation
+ended up with most of its content unsearchable.
+
+v2.5.1 adds `chunk_archive_body` to `archives::persist_record`. When a
+record's body exceeds 480 tokens (leaving headroom for header
+repetition), it is split into multiple chunks while:
+
+- Preserving the **header line** (the normalized `csv: file.csv row 7` /
+  `slack: @alice in #design 2026-04-12` prefix the handlers already
+  produce) at the top of every chunk so each chunk is self-describing
+  for both dense embeddings and BM25.
+- **Splitting at natural boundaries**: paragraph (`\n\n`) → line (`\n`)
+  → hard char wrap with UTF-8 boundary safety, in that order.
+- Keeping the **`documents` row identical**: full body still stored
+  there. Only the `chunks` rows multiply. So `get_document` returns
+  the whole record unchanged; `search_knowledge` returns the most
+  relevant slice; `get_chunk_context` (v2.4.0) walks neighbors of a
+  hit within the same record.
+
+Records under the threshold are unaffected (single chunk, exact
+behavior preserved). Existing pre-v2.5.1 archive records in your DB
+are still single oversize chunks; re-ingest if you want the new
+treatment for already-stored data.
+
+### Tests + verification
+
+- 6 new unit tests for `chunk_archive_body`: under threshold returns
+  single chunk; empty body handled; oversize paragraph-split with
+  header repeated; no-newline body falls back to char-wrap; header
+  token budget respected; chat-style messages split at message
+  boundaries.
+- 225 total tests pass (was 219).
+- `cargo fmt --check`, `cargo clippy -D warnings`, release build all
+  clean.
+
 ## v2.5.0 — 2026-05-04
 
 ### Chat-side collection scope picker
