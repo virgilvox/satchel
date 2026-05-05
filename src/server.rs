@@ -654,6 +654,9 @@ async fn api_ingest(
                 ProgressEvent::ArchiveDetected(name) => {
                     j.archive_kind = Some(name);
                 }
+                ProgressEvent::FilesPlanned(n) => {
+                    j.files_total = Some(n);
+                }
                 ProgressEvent::FileStarted(p) => {
                     j.files_seen += 1;
                     j.current_file = Some(p.to_string_lossy().to_string());

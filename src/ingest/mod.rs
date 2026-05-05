@@ -87,7 +87,11 @@ pub fn ingest_path(
             }
         }
     } else if path.is_dir() {
-        for entry in WalkDir::new(path)
+        // Pre-walk: collect every supported file so we know the total
+        // up-front. The UI uses this to render a determinate progress bar
+        // ("47 / 312"). Memory cost is one PathBuf per supported file —
+        // negligible for realistic vaults.
+        let files: Vec<std::path::PathBuf> = WalkDir::new(path)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
@@ -98,10 +102,14 @@ pub fn ingest_path(
                     .map(|ext| is_supported(&ext.to_lowercase()))
                     .unwrap_or(false)
             })
-        {
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        progress.emit(ProgressEvent::FilesPlanned(files.len()));
+
+        for file in files {
             stats.files_seen += 1;
-            progress.emit(ProgressEvent::FileStarted(entry.path().to_path_buf()));
-            match ingest_file(entry.path(), db, embedder, config) {
+            progress.emit(ProgressEvent::FileStarted(file.clone()));
+            match ingest_file(&file, db, embedder, config) {
                 Ok(true) => {
                     stats.records_added += 1;
                     progress.emit(ProgressEvent::RecordAdded);
@@ -111,7 +119,7 @@ pub fn ingest_path(
                     progress.emit(ProgressEvent::RecordSkipped);
                 }
                 Err(e) => {
-                    eprintln!("[satchel] Failed: {} - {e}", entry.path().display());
+                    eprintln!("[satchel] Failed: {} - {e}", file.display());
                     stats.records_failed += 1;
                     progress.emit(ProgressEvent::RecordFailed);
                 }

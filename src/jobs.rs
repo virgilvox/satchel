@@ -34,6 +34,11 @@ pub struct Job {
     pub error: Option<String>,
     pub current_file: Option<String>,
     pub files_seen: usize,
+    /// Total supported files the pre-walk discovered (directory ingest
+    /// only). `None` for archive ingest and single-file ingest, where a
+    /// determinate count isn't available without doing real parse work.
+    /// The UI uses `Some(n)` to render a determinate progress bar.
+    pub files_total: Option<usize>,
     pub records_added: usize,
     pub records_skipped: usize,
     pub records_failed: usize,
@@ -51,6 +56,7 @@ impl Job {
             error: None,
             current_file: None,
             files_seen: 0,
+            files_total: None,
             records_added: 0,
             records_skipped: 0,
             records_failed: 0,

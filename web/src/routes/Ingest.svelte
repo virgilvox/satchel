@@ -90,6 +90,27 @@
   });
 
   function fmtNum(n: number | undefined) { return (n ?? 0).toLocaleString(); }
+  /** Records-per-second derived from records_added and elapsed wall-clock.
+   *  Returns null while the job is too young (<1s) to have a meaningful
+   *  rate — no division-by-zero, no jittery 100k/s flashes at the start. */
+  function rate(j: IngestJob): string | null {
+    if (!j.started_at) return null;
+    const start = new Date(j.started_at).getTime();
+    const end = j.finished_at ? new Date(j.finished_at).getTime() : Date.now();
+    const sec = (end - start) / 1000;
+    if (sec < 1) return null;
+    const rps = (j.records_added ?? 0) / sec;
+    if (rps < 1) return rps.toFixed(2) + '/s';
+    if (rps < 100) return rps.toFixed(1) + '/s';
+    return Math.round(rps).toLocaleString() + '/s';
+  }
+  /** 0..1 fraction for the determinate progress bar, or null if we can't
+   *  compute one (archive ingest, single-file, or pre-walk hasn't reported
+   *  the total yet). */
+  function progressFrac(j: IngestJob): number | null {
+    if (!j.files_total || j.files_total === 0) return null;
+    return Math.min(1, (j.files_seen ?? 0) / j.files_total);
+  }
   function fmtTime(iso?: string) {
     if (!iso) return '';
     const d = new Date(iso);
@@ -158,12 +179,17 @@
         {#if j.records_failed}
           <span><b>{fmtNum(j.records_failed)}</b> failed</span>
         {/if}
-        <span><b>{fmtNum(j.files_seen)}</b> seen</span>
+        {#if j.files_total}
+          <span><b>{fmtNum(j.files_seen)}</b> / <b>{fmtNum(j.files_total)}</b> files</span>
+        {:else}
+          <span><b>{fmtNum(j.files_seen)}</b> seen</span>
+        {/if}
         {#if j.archive_kind}
           <span class="archive">archive: {j.archive_kind}</span>
         {/if}
         {#if j.status === 'running' || j.status === 'pending'}
           <span>elapsed: <b>{fmtDuration(j.started_at)}</b></span>
+          {#if rate(j)}<span>rate: <b>{rate(j)}</b></span>{/if}
         {:else}
           <span>took <b>{fmtDuration(j.started_at, j.finished_at)}</b> · finished {fmtTime(j.finished_at)}</span>
         {/if}
@@ -173,7 +199,14 @@
       {/if}
       {#if j.error}<div class="error">{j.error}</div>{/if}
       {#if j.status === 'running' || j.status === 'pending'}
-        <div class="bar"><div class="fill"></div></div>
+        {@const frac = progressFrac(j)}
+        {#if frac !== null}
+          <div class="bar determinate">
+            <div class="fill-det" style="width: {(frac * 100).toFixed(1)}%"></div>
+          </div>
+        {:else}
+          <div class="bar"><div class="fill"></div></div>
+        {/if}
       {/if}
     </div>
   {/each}
@@ -270,6 +303,11 @@
   .fill {
     height: 100%; background: var(--amber); width: 30%;
     animation: pulse 1.4s ease-in-out infinite;
+  }
+  .bar.determinate { background: var(--border); }
+  .fill-det {
+    height: 100%; background: var(--teal);
+    transition: width 300ms ease-out;
   }
   @keyframes pulse { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
 

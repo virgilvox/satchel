@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.6.1 — 2026-05-04
+
+### Determinate ingest progress for directory walks
+
+Directory ingest now does a one-shot pre-walk to count every supported
+file before processing starts, then reports the total back to the UI as
+`files_total`. The Ingest view uses it to render a real, filling
+progress bar with `seen / total` counts and a percentage, instead of
+the indeterminate amber pulse.
+
+The pre-walk is cheap (filesystem metadata + extension match) and stays
+in memory only as a `Vec<PathBuf>` of supported files, so cost scales
+with what would already be processed, not the directory size. Archive
+ingest and single-file ingest still fall back to the indeterminate bar
+since their record totals aren't knowable without parse work.
+
+The per-job meta line also picks up a live `rate: 12.4/s` chip showing
+records-added-per-second, derived client-side from `records_added` and
+elapsed wall-clock — useful for eyeballing whether a long-running job is
+making meaningful progress and for guessing ETA.
+
+New `ProgressEvent::FilesPlanned(usize)` variant on the ingest progress
+bus and `Job.files_total: Option<usize>` on the job registry. No schema
+migration; jobs are in-memory only.
+
 ## v2.6.0 — 2026-05-04
 
 ### Anthropic API key validation button

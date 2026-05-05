@@ -13,6 +13,12 @@ use std::sync::Arc;
 pub enum ProgressEvent {
     /// An archive layout was matched and the specialized handler is starting.
     ArchiveDetected(String),
+    /// Total supported files discovered after a pre-walk. Emitted once at
+    /// the start of a directory ingest, before any `FileStarted`. Lets the
+    /// UI render a determinate progress bar instead of an indeterminate
+    /// pulse. Archive handlers don't currently emit this — they walk and
+    /// process in one pass — so consumers must treat it as optional.
+    FilesPlanned(usize),
     /// We're about to process this path (one event per file in walks; one per
     /// daily JSON in Slack; one per email in mbox; etc.). Cosmetic; safe to ignore.
     FileStarted(PathBuf),

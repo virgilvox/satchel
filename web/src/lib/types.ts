@@ -107,6 +107,10 @@ export interface IngestJob {
   status: JobStatus;
   archive_kind?: string;
   files_seen: number;
+  /** Total supported files discovered by the pre-walk (directory ingest
+   *  only). Absent for archive ingest and single-file ingest — UI must
+   *  fall back to an indeterminate bar. */
+  files_total?: number;
   records_added: number;
   records_skipped: number;
   records_failed: number;
