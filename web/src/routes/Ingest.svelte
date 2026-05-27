@@ -4,11 +4,49 @@
   import Modal from '../components/Modal.svelte';
   import StatusLine from '../components/StatusLine.svelte';
   import { api } from '../lib/api';
+  import { collection } from '../lib/stores.svelte';
   import type { BrowseEntry, IngestJob } from '../lib/types';
 
   let path = $state('');
   let status = $state('');
   let statusTone = $state<'dim' | 'teal' | 'danger'>('dim');
+
+  // Collection destination for the next ingest job. Three states:
+  //   'global'  -> follow the TopBar scope (which may itself be ALL)
+  //   ''        -> explicitly ingest with no collection assignment
+  //   <number>  -> override; pin this job to a specific collection
+  // 'global' is the default so a user who picked Work from the chip
+  // does not have to re-pick it here every time they queue a job.
+  let destMode = $state<'global' | '' | number>('global');
+  let newCollectionDraft = $state('');
+  let createBusy = $state(false);
+
+  function resolveDestination(): { collection_id?: number; collection_name?: string } | null {
+    const draft = newCollectionDraft.trim();
+    if (draft) {
+      // Server side resolves-or-creates, so we pass the name through
+      // verbatim. Clearing the draft happens after the job is queued.
+      return { collection_name: draft };
+    }
+    if (destMode === 'global') {
+      return collection.activeId != null ? { collection_id: collection.activeId } : {};
+    }
+    if (destMode === '') return {};
+    return { collection_id: destMode };
+  }
+
+  let destLabel = $derived.by(() => {
+    const draft = newCollectionDraft.trim();
+    if (draft) return `new: ${draft}`;
+    if (destMode === 'global') {
+      return collection.activeName
+        ? `follows scope: ${collection.activeName}`
+        : 'no collection (whole vault)';
+    }
+    if (destMode === '') return 'no collection (whole vault)';
+    const c = collection.list.find((c) => c.id === destMode);
+    return c ? c.name : `#${destMode}`;
+  });
 
   // Jobs
   let jobs = $state<IngestJob[]>([]);
@@ -41,11 +79,15 @@
     }
     statusTone = 'dim'; status = 'QUEUING JOB FOR ' + p + '...';
     try {
-      const r = await api.ingest(p);
+      const dest = resolveDestination();
+      const r = await api.ingest(p, dest ?? {});
       if (r.error) { statusTone = 'danger'; status = 'FAILED · ' + r.error; }
       else {
-        statusTone = 'teal'; status = 'JOB QUEUED · TRACK PROGRESS BELOW';
+        const into = destLabel;
+        statusTone = 'teal';
+        status = `JOB QUEUED · INTO ${into.toUpperCase()} · TRACK PROGRESS BELOW`;
         path = '';
+        newCollectionDraft = '';
         refreshJobs();
       }
     } catch (e) {
@@ -153,6 +195,67 @@
   live progress below.
 </p>
 
+<div class="dest">
+  <div class="dest-head">
+    <span class="dest-label">DESTINATION COLLECTION</span>
+    <span class="dest-preview">{destLabel}</span>
+  </div>
+  <div class="dest-row">
+    <label class="dest-choice">
+      <input type="radio" name="dest" value="global"
+        checked={destMode === 'global'}
+        onchange={() => (destMode = 'global')} />
+      <span>
+        FOLLOW TOP-BAR SCOPE
+        <span class="hint">
+          {collection.activeName
+            ? `currently ${collection.activeName}`
+            : 'currently ALL, whole vault'}
+        </span>
+      </span>
+    </label>
+    <label class="dest-choice">
+      <input type="radio" name="dest" value="none"
+        checked={destMode === ''}
+        onchange={() => (destMode = '')} />
+      <span>NO COLLECTION <span class="hint">whole vault, no membership added</span></span>
+    </label>
+    {#if collection.list.length > 0}
+      <label class="dest-choice">
+        <input type="radio" name="dest" value="pick"
+          checked={typeof destMode === 'number'}
+          onchange={() => {
+            if (typeof destMode !== 'number') {
+              destMode = collection.list[0].id;
+            }
+          }} />
+        <span>
+          PIN TO
+          <select class="select inline"
+            disabled={typeof destMode !== 'number'}
+            bind:value={destMode}>
+            {#each collection.list as c (c.id)}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </select>
+        </span>
+      </label>
+    {/if}
+  </div>
+  <div class="dest-new">
+    <span class="dest-label">OR CREATE A NEW COLLECTION FOR THIS JOB</span>
+    <input type="text" class="input"
+      placeholder="e.g. work, journal, slack-2026"
+      bind:value={newCollectionDraft}
+      disabled={createBusy} />
+    <p class="hint">
+      If filled, the job ignores the choices above and assigns every
+      ingested document to a collection with this name (created if it
+      does not yet exist).
+    </p>
+  </div>
+</div>
+
 <div class="row">
   <input type="text" class="input grow" placeholder="/Users/you/Documents/slack-export"
     bind:value={path}
@@ -252,6 +355,83 @@
     padding: 1px 6px;
     font-size: 11px;
   }
+  .dest {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .dest-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .dest-label {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 700;
+  }
+  .dest-preview {
+    color: var(--amber);
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+  .dest-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .dest-choice {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 11px;
+    color: var(--text);
+    cursor: pointer;
+    line-height: 1.5;
+  }
+  .dest-choice input[type='radio'] {
+    margin-top: 3px;
+    accent-color: var(--amber);
+    cursor: pointer;
+  }
+  .dest-choice .hint {
+    display: block;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0.3px;
+    margin-top: 2px;
+  }
+  .dest-choice .select.inline {
+    margin-left: 8px;
+    padding: 2px 8px;
+    font-size: 11px;
+  }
+  .dest-new {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+  }
+  .dest-new .hint {
+    color: var(--text-dim);
+    font-size: 10px;
+    margin: 0;
+    line-height: 1.5;
+  }
+
   .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
   .grow { flex: 1; min-width: 220px; }
   .job {

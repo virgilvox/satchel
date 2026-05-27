@@ -338,6 +338,11 @@ enum Commands {
         /// Chunk overlap in approximate tokens
         #[arg(long, default_value_t = 64)]
         chunk_overlap: usize,
+
+        /// Add every ingested document to this collection. Created
+        /// automatically if the name does not yet exist in the vault.
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
     },
 
     /// Manage vaults
@@ -400,6 +405,21 @@ enum VaultAction {
     Create { name: String },
     /// Set the active vault
     Use { name: String },
+}
+
+/// Look up a collection by name, creating it if missing. Returns the
+/// resolved collection id. `name` is the trimmed, non-empty CLI value;
+/// the caller has already validated emptiness.
+fn resolve_or_create_collection(db: &rag::Database, name: &str) -> Result<i64> {
+    for c in db.list_collections()? {
+        if c.name.eq_ignore_ascii_case(name) {
+            eprintln!("[satchel] Ingesting into existing collection: {}", c.name);
+            return Ok(c.id);
+        }
+    }
+    let id = db.create_collection(name)?;
+    eprintln!("[satchel] Created collection: {name}");
+    Ok(id)
 }
 
 /// Ensure a default vault exists. Creates one if the vault directory has no vaults.
@@ -474,14 +494,41 @@ async fn main() -> Result<()> {
             watch,
             chunk_size,
             chunk_overlap,
+            collection,
         } => {
             ensure_default_vault(&vault_path)?;
             let vault_dir = vault::active_vault_path(&vault_path)?;
             let db = rag::Database::open(&vault_dir)?;
             let embedder = embed::Embedder::load(&vault_path)?;
+
+            // Fail fast (and BEFORE collection resolution) if there's
+            // no embedder available. Otherwise we would auto-create
+            // the requested collection, partially insert orphan
+            // documents whose chunks then fail to embed, and leave
+            // the vault in a half-written state. Matches the HTTP
+            // /api/ingest pre-check.
+            if !embedder.is_available() {
+                anyhow::bail!(
+                    "embedding model unavailable; ingest would fail. Run \
+                     ./scripts/download-model.sh or rebuild with \
+                     --features embed-model"
+                );
+            }
+
+            // Resolve `--collection <name>` to an id. Per UX choice
+            // (the create-on-typo tradeoff), a name that does not yet
+            // exist is created on the fly so `satchel ingest -c work
+            // ~/docs` is a single command instead of a two-step
+            // "create collection, then ingest into it" dance.
+            let collection_id = match collection.as_deref().map(str::trim) {
+                Some(name) if !name.is_empty() => Some(resolve_or_create_collection(&db, name)?),
+                _ => None,
+            };
+
             let config = ingest::IngestConfig {
                 chunk_size,
                 chunk_overlap,
+                collection_id,
             };
 
             if watch {
@@ -608,6 +655,23 @@ fn confirm(prompt: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn resolve_or_create_collection_creates_when_missing() {
+        // First call against an empty DB should create the collection
+        // and return its id; second call with the same name should
+        // resolve to the same id (no duplicate). Case-insensitive
+        // matching keeps "work" and "Work" from coexisting under
+        // typo-create-on-the-fly UX.
+        let db = rag::Database::open_memory().unwrap();
+        let id1 = resolve_or_create_collection(&db, "work").unwrap();
+        let id2 = resolve_or_create_collection(&db, "work").unwrap();
+        let id3 = resolve_or_create_collection(&db, "WORK").unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(id1, id3);
+        let cols = db.list_collections().unwrap();
+        assert_eq!(cols.len(), 1);
+    }
 
     #[test]
     fn vault_next_to_raw_binary_is_found() {

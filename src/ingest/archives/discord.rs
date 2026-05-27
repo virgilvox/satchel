@@ -41,6 +41,7 @@ pub fn ingest(
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<ArchiveStats> {
     let bytes = std::fs::read(path)?;
     let v: Value = serde_json::from_slice(&bytes)?;
@@ -128,7 +129,7 @@ pub fn ingest(
             title,
             body,
         };
-        if persist_record(&record, "discord", db, embedder, progress)? {
+        if persist_record(&record, "discord", db, embedder, progress, collection_id)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

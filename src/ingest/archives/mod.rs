@@ -115,22 +115,27 @@ pub struct ArchiveStats {
     pub files_failed: usize,
 }
 
-/// Dispatch to the appropriate handler.
+/// Dispatch to the appropriate handler. `collection_id`, when set, is
+/// forwarded into every `persist_record` call so each emitted document
+/// joins the named collection at insert time. This is what makes
+/// "ingest a Slack export into the Work collection" a one-step
+/// operation instead of an ingest-then-assign two-step.
 pub fn ingest(
     kind: ArchiveKind,
     path: &Path,
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<ArchiveStats> {
     match kind {
-        ArchiveKind::Slack => slack::ingest(path, db, embedder, progress),
-        ArchiveKind::ChatGpt => chatgpt::ingest(path, db, embedder, progress),
-        ArchiveKind::ClaudeAi => claude_ai::ingest(path, db, embedder, progress),
-        ArchiveKind::Discord => discord::ingest(path, db, embedder, progress),
-        ArchiveKind::WhatsApp => whatsapp::ingest(path, db, embedder, progress),
-        ArchiveKind::Mbox => mbox::ingest(path, db, embedder, progress),
-        ArchiveKind::Csv => csv::ingest(path, db, embedder, progress),
+        ArchiveKind::Slack => slack::ingest(path, db, embedder, progress, collection_id),
+        ArchiveKind::ChatGpt => chatgpt::ingest(path, db, embedder, progress, collection_id),
+        ArchiveKind::ClaudeAi => claude_ai::ingest(path, db, embedder, progress, collection_id),
+        ArchiveKind::Discord => discord::ingest(path, db, embedder, progress, collection_id),
+        ArchiveKind::WhatsApp => whatsapp::ingest(path, db, embedder, progress, collection_id),
+        ArchiveKind::Mbox => mbox::ingest(path, db, embedder, progress, collection_id),
+        ArchiveKind::Csv => csv::ingest(path, db, embedder, progress, collection_id),
     }
 }
 
@@ -157,6 +162,7 @@ pub(crate) fn persist_record(
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<bool> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -165,7 +171,16 @@ pub(crate) fn persist_record(
     hasher.update(record.body.as_bytes());
     let sha256 = format!("{:x}", hasher.finalize());
 
+    // Dedup-skip path: the content is already in the vault. We still
+    // honor the caller's collection_id so a "re-ingest this Slack
+    // export into the new Work collection" run actually populates Work
+    // with the existing records, instead of silently doing nothing.
     if db.document_exists_by_hash(&sha256)? {
+        if let Some(cid) = collection_id {
+            if let Some(existing_id) = db.document_id_by_hash(&sha256)? {
+                db.collection_add_documents(cid, std::slice::from_ref(&existing_id))?;
+            }
+        }
         progress.emit(ProgressEvent::RecordSkipped);
         return Ok(false);
     }
@@ -179,6 +194,10 @@ pub(crate) fn persist_record(
         &record.body,
         &sha256,
     )?;
+
+    if let Some(cid) = collection_id {
+        db.collection_add_documents(cid, std::slice::from_ref(&doc_id))?;
+    }
 
     // Sub-chunk if the body is too long for the embedder's context.
     // Short bodies still produce exactly one chunk (current behavior

@@ -3,8 +3,8 @@
   import ResultList from '../components/ResultList.svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import Modal from '../components/Modal.svelte';
-  import CollectionScope from '../components/CollectionScope.svelte';
   import { api } from '../lib/api';
+  import { collection } from '../lib/stores.svelte';
   import type { SearchResult } from '../lib/types';
 
   let q = $state('');
@@ -13,9 +13,16 @@
   let loading = $state(false);
   let error = $state<string | undefined>();
   let lastQuery = $state('');
-  let scope: number | '' = $state('');
   const PAGE = 20;
-  const scopeId = () => (scope === '' ? undefined : (scope as number));
+  // Scope follows the TopBar chip. Re-runs the last query whenever it
+  // changes so the result list reflects the current scope without the
+  // user having to hit Enter again.
+  const scopeId = () => collection.activeId ?? undefined;
+  $effect(() => {
+    // Touch the rune to register the dependency.
+    void collection.activeId;
+    if (lastQuery) run(lastQuery);
+  });
 
   // Context modal state
   let ctxOpen = $state(false);
@@ -49,10 +56,6 @@
     }
   }
 
-  function onScopeChange() {
-    if (lastQuery) run(lastQuery);
-  }
-
   async function showContext(result: SearchResult) {
     ctxOpen = true;
     ctxSource = result.source;
@@ -76,7 +79,9 @@
   desc="Semantic embeddings fused with keyword FTS via Reciprocal Rank Fusion. Higher score = more on-topic." />
 
 <SearchBox bind:value={q} placeholder="natural-language query..." onsubmit={run} />
-<CollectionScope bind:value={scope} onchange={onScopeChange} />
+{#if collection.activeName}
+  <p class="scope-readout">scoped to <strong>{collection.activeName}</strong>; change in the top bar</p>
+{/if}
 
 <div class="results">
   <ResultList {results} {total} {loading} {error}
@@ -107,6 +112,17 @@
 </Modal>
 
 <style>
+  .scope-readout {
+    margin: 10px 0 0;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .scope-readout strong {
+    color: var(--amber);
+    font-weight: 700;
+  }
   .results { margin-top: 18px; }
   .ctx-path {
     padding: 10px 18px;

@@ -7,6 +7,7 @@ fn config() -> IngestConfig {
     IngestConfig {
         chunk_size: 512,
         chunk_overlap: 64,
+        collection_id: None,
     }
 }
 
@@ -207,6 +208,144 @@ async fn test_ingest_csv_directory_walk() {
 
     // a.csv => 2 records, b.csv => 1 record. Total 3.
     assert_eq!(db.stats().unwrap().document_count, 3);
+}
+
+#[tokio::test]
+async fn test_ingest_assigns_to_collection_when_configured() {
+    // When IngestConfig::collection_id is set, every persisted document
+    // joins that collection in a single pass. This is what backs the
+    // Ingest tab's collection picker and `satchel ingest --collection`.
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+    let dir = TempDir::new().unwrap();
+
+    let cid = db.create_collection("work").unwrap();
+    std::fs::write(dir.path().join("a.md"), "Document A.").unwrap();
+    std::fs::write(dir.path().join("b.md"), "Document B.").unwrap();
+
+    let cfg = IngestConfig {
+        chunk_size: 512,
+        chunk_overlap: 64,
+        collection_id: Some(cid),
+    };
+    ingest::ingest_path(dir.path(), &db, &embedder, &cfg, &Progress::noop()).unwrap();
+
+    let cols = db.list_collections().unwrap();
+    let work = cols.iter().find(|c| c.id == cid).unwrap();
+    assert_eq!(work.document_count, 2);
+
+    // A second ingest into the same paths is a no-op (hash dedup); the
+    // count should stay at 2, not double up via re-assignment.
+    ingest::ingest_path(dir.path(), &db, &embedder, &cfg, &Progress::noop()).unwrap();
+    let work2 = db.list_collections().unwrap();
+    assert_eq!(
+        work2.iter().find(|c| c.id == cid).unwrap().document_count,
+        2
+    );
+}
+
+#[tokio::test]
+async fn test_ingest_dedup_skip_still_joins_new_collection() {
+    // Regression guard for the dedup-skip semantic: if the user
+    // re-ingests an already-known document into a NEW collection, the
+    // existing doc should join the new collection. Without this fix,
+    // a re-ingest into "personal" after the same content was first
+    // ingested into "work" would silently leave "personal" empty.
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+    let dir = TempDir::new().unwrap();
+
+    let work = db.create_collection("work").unwrap();
+    let personal = db.create_collection("personal").unwrap();
+
+    let path = dir.path().join("note.md");
+    std::fs::write(&path, "shared note body").unwrap();
+
+    let cfg_work = IngestConfig {
+        chunk_size: 512,
+        chunk_overlap: 64,
+        collection_id: Some(work),
+    };
+    ingest::ingest_path(&path, &db, &embedder, &cfg_work, &Progress::noop()).unwrap();
+    assert_eq!(
+        db.list_collections()
+            .unwrap()
+            .iter()
+            .find(|c| c.id == work)
+            .unwrap()
+            .document_count,
+        1
+    );
+
+    let cfg_personal = IngestConfig {
+        chunk_size: 512,
+        chunk_overlap: 64,
+        collection_id: Some(personal),
+    };
+    ingest::ingest_path(&path, &db, &embedder, &cfg_personal, &Progress::noop()).unwrap();
+
+    // Document is still single (hash dedup), but it now belongs to BOTH collections.
+    assert_eq!(db.stats().unwrap().document_count, 1);
+    let cols = db.list_collections().unwrap();
+    let work_count = cols.iter().find(|c| c.id == work).unwrap().document_count;
+    let personal_count = cols
+        .iter()
+        .find(|c| c.id == personal)
+        .unwrap()
+        .document_count;
+    assert_eq!(work_count, 1);
+    assert_eq!(personal_count, 1);
+}
+
+#[tokio::test]
+async fn test_ingest_archive_csv_assigns_to_collection() {
+    // The archive-handler path (csv, slack, mbox, etc.) goes through
+    // persist_record, not ingest_file. Cover the CSV archive
+    // explicitly so a future refactor that drops the collection_id
+    // forwarding from any archive handler trips this test.
+    let db = common::test_db();
+    let embedder = common::test_embedder();
+    let dir = TempDir::new().unwrap();
+
+    let cid = db.create_collection("contacts").unwrap();
+    let path = dir.path().join("rows.csv");
+    std::fs::write(&path, "name,role\nAlice,founder\nBob,engineer\n").unwrap();
+
+    let cfg = IngestConfig {
+        chunk_size: 512,
+        chunk_overlap: 64,
+        collection_id: Some(cid),
+    };
+    ingest::ingest_path(&path, &db, &embedder, &cfg, &Progress::noop()).unwrap();
+
+    let stats = db.stats().unwrap();
+    assert_eq!(stats.document_count, 2, "one document per CSV row");
+
+    let count = db
+        .list_collections()
+        .unwrap()
+        .iter()
+        .find(|c| c.id == cid)
+        .unwrap()
+        .document_count;
+    assert_eq!(
+        count, 2,
+        "every CSV row should join the requested collection"
+    );
+}
+
+#[tokio::test]
+async fn test_document_id_by_hash_lookup() {
+    // The dedup-skip-still-joins-new-collection behavior relies on
+    // document_id_by_hash. Pin the contract: returns Some(id) for a
+    // known hash, None for an unknown one.
+    let db = common::test_db();
+    db.insert_document("d1", "/x.md", "md", None, "body", "hash-known")
+        .unwrap();
+    let known = db.document_id_by_hash("hash-known").unwrap();
+    let missing = db.document_id_by_hash("hash-missing").unwrap();
+    assert_eq!(known, Some("d1".to_string()));
+    assert_eq!(missing, None);
 }
 
 #[tokio::test]

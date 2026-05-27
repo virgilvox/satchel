@@ -134,8 +134,12 @@ export const api = {
   browse: (path: string) =>
     getJson<BrowseResponse>('/api/browse?path=' + encodeURIComponent(path)),
 
-  ingest: (path: string) =>
-    postJson<{ job_id?: string; error?: string }>('/api/ingest', { path }),
+  ingest: (path: string, opts?: { collection_id?: number; collection_name?: string }) =>
+    postJson<{ job_id?: string; error?: string }>('/api/ingest', {
+      path,
+      ...(opts?.collection_id != null ? { collection_id: opts.collection_id } : {}),
+      ...(opts?.collection_name ? { collection_name: opts.collection_name } : {}),
+    }),
 
   jobs: () => getJson<{ jobs: IngestJob[] }>('/api/jobs'),
 
@@ -185,6 +189,11 @@ export const api = {
       { document_ids },
     ),
 
+  connectInfo: () => getJson<ConnectInfo>('/api/connect-info'),
+  mdnsGet: () => getJson<MdnsState>('/api/mdns'),
+  mdnsSet: (enabled: boolean) =>
+    postJson<MdnsState>('/api/mdns', { enabled }),
+
   tunnelStatus: () => getJson<TunnelState>('/api/tunnel'),
   tunnelStart:  (mode: TunnelMode = 'quick') =>
     postJson<TunnelState>('/api/tunnel/start', { mode }),
@@ -196,6 +205,30 @@ export const api = {
 };
 
 export type TunnelMode = 'quick' | 'named';
+
+export interface ConnectInfo {
+  binary_path: string;
+  port: number;
+  local_url: string;
+  mcp_url: string;
+  lan_ip: string | null;
+  lan_url: string | null;
+  lan_mcp_url: string | null;
+  mdns: {
+    enabled: boolean;
+    hostname: string;
+    url: string | null;
+    mcp_url: string | null;
+  };
+  error?: string;
+}
+
+export interface MdnsState {
+  enabled: boolean;
+  running: boolean;
+  hostname: string;
+  error?: string;
+}
 
 export interface CollectionSummary {
   id: number;

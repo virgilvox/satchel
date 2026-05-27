@@ -1,5 +1,96 @@
 # Changelog
 
+## v2.7.0 (2026-05-27)
+
+### Collections become the app's primary scope
+
+The active collection is now a vault-wide context driven by a single
+chip in the top bar. Picking a collection there propagates to Search,
+Ask, Chat, Documents, and the Ingest tab's default destination, so
+"work inside the Work collection for the next hour" is one click
+instead of three separate per-page pickers. ALL still means whole
+vault. Per-page mini-pickers were removed; each scoped view shows a
+small "scoped to X; change in the top bar" readout when a scope is
+active, so the chip is always discoverable. Collection management
+(create, delete, bulk-move) stays on the Documents tab; the chip's
+dropdown links to it.
+
+A one-shot migration lifts the v2.5.0 through v2.6.x chat-scope
+setting into the new global key on first load, so the user's
+previously chosen chat scope is preserved on upgrade.
+
+### Ingest into a collection, in one step
+
+The Ingest tab grows a destination block above the path input with
+three options: follow the top-bar scope (default), ingest with no
+collection at all, or pin this job to a specific collection. There is
+also a free-text "create a new collection for this job" field that
+auto-creates the named collection server-side if it does not yet
+exist. The status line shows the resolved destination on queue
+("JOB QUEUED · INTO WORK").
+
+CLI gets the same: `satchel ingest -c <name> <path>` ingests with
+collection assignment and auto-creates the named collection if
+missing. Re-ingesting an already-known document into a new collection
+now joins the existing document to the requested collection rather
+than silently dropping the assignment under hash dedup.
+
+Server side: `POST /api/ingest` accepts `collection_id` or
+`collection_name`; id wins when both are present. The embedder
+availability check moved ahead of collection resolution so a failed
+ingest from a no-model dev build does not leave an orphan empty
+collection. `IngestConfig.collection_id` threads through every code
+path including the seven archive handlers (Slack, ChatGPT, Claude.ai,
+Discord, WhatsApp, mbox, CSV/TSV).
+
+### satchel.local on the LAN, via mDNS
+
+The HTTP server now advertises itself over Multicast DNS so any
+device on the same network can reach it at
+`http://satchel.local:7428` without looking up an IP. Pure-Rust via
+the `mdns-sd` crate, no native deps, on by default. Persisted toggle
+at `<vault>/mdns.toml`; flip it from the Connect tab to stop
+broadcasting.
+
+macOS resolves `satchel.local` natively via mDNSResponder; Windows 10
+and newer resolve through the built-in DNS client; Linux desktops
+that ship `nss-mdns` or `avahi-daemon` resolve out of the box.
+Smoke-tested on macOS: `dscacheutil -q host -a name satchel.local`
+returns the host's IPv6 link-local addresses and the LAN IP.
+
+### Connect page reframe
+
+Top of the page now leads with three live addresses in priority
+order: loopback MCP URL, satchel.local MCP URL (when mDNS is on), and
+LAN IP MCP URL. Each has a one-click COPY button. The per-client
+setup snippets (Claude Desktop, Claude Code, Cursor, browser) now
+have the real binary path auto-filled from a new
+`GET /api/connect-info` endpoint instead of asking users to manually
+replace `/path/to/satchel`. The tunnel panel moves to a "remote
+access" section at the bottom. Plain prose throughout: no emdashes,
+no emoji icons.
+
+### Test growth
+
+238 tests passing (up from 216). New coverage:
+
+- `test_ingest_assigns_to_collection_when_configured`
+- `test_ingest_dedup_skip_still_joins_new_collection`
+- `test_ingest_archive_csv_assigns_to_collection`
+- `test_document_id_by_hash_lookup`
+- `test_get_api_connect_info`
+- `test_get_api_mdns_returns_state`
+- `test_post_api_mdns_toggle_off_persists`
+- `test_post_api_ingest_creates_collection_by_name`
+- `test_post_api_ingest_rejects_missing_path_without_creating_collection`
+- Four mDNS-config unit tests
+
+### Dependencies
+
+`mdns-sd = "0.20"` added with default features off (`logging` only;
+the `async` flag dropped to keep the binary lean). Pure Rust, no C
+deps, keeps the static-musl Linux story intact.
+
 ## v2.6.1 — 2026-05-04
 
 ### Determinate ingest progress for directory walks

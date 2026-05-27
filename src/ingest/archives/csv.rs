@@ -55,6 +55,7 @@ pub fn ingest(
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<ArchiveStats> {
     let bytes = std::fs::read(path)?;
     let extension = path
@@ -132,7 +133,7 @@ pub fn ingest(
             body,
         };
 
-        if persist_record(&record, file_type, db, embedder, progress)? {
+        if persist_record(&record, file_type, db, embedder, progress, collection_id)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

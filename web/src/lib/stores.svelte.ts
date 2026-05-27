@@ -7,11 +7,17 @@
 // first import.
 
 import type { Mode, StatusResponse, Tab } from './types';
+import type { CollectionSummary } from './api';
 
 const STORAGE_MODE_KEY = 'satchel-mode';
 const STORAGE_MCP_KEY = 'satchel-mcp-endpoint';
 const STORAGE_MODEL_KEY = 'satchel-chat-model';
 const STORAGE_SYSTEM_KEY = 'satchel-chat-system';
+// Vault-wide active collection scope. `''` is "search the whole vault";
+// a numeric id pins every scoped view (Ask, Search, Chat, Documents,
+// Ingest) to a single collection. This is the user-facing "I am
+// working inside Collection X right now" context.
+const STORAGE_SCOPE_KEY = 'satchel-active-collection-id';
 
 // Some browsers (Firefox strict private, Safari ITP, sandboxed iframes)
 // throw on any localStorage access. Treat that as "no preference" rather
@@ -76,6 +82,63 @@ class RouterStore {
   }
 }
 
+/** Vault-wide active collection.
+ *
+ *  Every scoped view in the app reads `collection.activeId` to know
+ *  what to filter by; setting it from one place (the TopBar scope chip)
+ *  propagates to Search, Ask, Chat, Documents, and the Ingest tab's
+ *  default destination.
+ *
+ *  `activeId === null` means "no scope, vault-wide." The list is
+ *  refreshed from `/api/collections` on demand (after create/delete in
+ *  Documents, or on first mount of the chip). */
+class CollectionStore {
+  activeId = $state<number | null>(readInitialScope());
+  list = $state<CollectionSummary[]>([]);
+  loaded = $state(false);
+
+  get activeName(): string | null {
+    const id = this.activeId;
+    if (id == null) return null;
+    return this.list.find((c) => c.id === id)?.name ?? null;
+  }
+
+  setActive(id: number | null) {
+    this.activeId = id;
+    safeSet(STORAGE_SCOPE_KEY, id == null ? '' : String(id));
+  }
+
+  /** Replace the in-memory list. If the previously active id is no
+   *  longer present (collection deleted out from under us), fall back
+   *  to ALL so the UI does not display a stale name. */
+  setList(next: CollectionSummary[]) {
+    this.list = next;
+    this.loaded = true;
+    if (this.activeId != null && !next.some((c) => c.id === this.activeId)) {
+      this.setActive(null);
+    }
+  }
+}
+
+function readInitialScope(): number | null {
+  // One-shot migration from the v2.5.0-v2.6.x chat-only scope keys.
+  // If the new global key is empty but the chat-scope key is set, lift
+  // that value into the global store so existing users do not lose
+  // their Chat scope on upgrade. We never write back here; the next
+  // `setActive(...)` call will overwrite the migrated value cleanly.
+  const raw = safeGet(STORAGE_SCOPE_KEY);
+  if (raw) {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  const legacy = safeGet('satchel-chat-scope-collection-id');
+  if (legacy) {
+    const n = Number(legacy);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 // Chat-only knobs. Kept separate from `SettingsStore` because they
 // belong to a single tab (Chat) and the settings modal lives there.
 // All persisted to localStorage individually so flipping one doesn't
@@ -100,11 +163,6 @@ const CHAT_KEYS = {
   anthropicMaxTokens: 'satchel-chat-anthropic-max-tokens',
   anthropicCaching: 'satchel-chat-anthropic-caching',
   anthropicSystemPrompt: 'satchel-chat-anthropic-system',
-  // Chat scope: which collection (if any) is auto-injected into every
-  // `search_knowledge` call. Persisted as collection id; empty string
-  // means "search the whole vault."
-  chatScopeCollectionId: 'satchel-chat-scope-collection-id',
-  chatScopeCollectionName: 'satchel-chat-scope-collection-name',
 };
 
 export type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -213,16 +271,6 @@ class ChatSettingsStore {
   anthropicMaxTokens = $state(readNumber(CHAT_KEYS.anthropicMaxTokens, 16000));
   anthropicCaching = $state(readBool(CHAT_KEYS.anthropicCaching, true));
   anthropicSystemPrompt = $state(safeGet(CHAT_KEYS.anthropicSystemPrompt) ?? DEFAULT_ANTHROPIC_SYSTEM);
-  // Chat scope. `chatScopeId` is `''` for "whole vault" or a numeric
-  // collection id. `chatScopeName` is the display label (also used as
-  // the value passed to `search_knowledge`'s `collection_name` arg —
-  // collection names are the user-facing identifier).
-  chatScopeId = $state<number | ''>(
-    safeGet(CHAT_KEYS.chatScopeCollectionId)
-      ? Number(safeGet(CHAT_KEYS.chatScopeCollectionId))
-      : ''
-  );
-  chatScopeName = $state<string>(safeGet(CHAT_KEYS.chatScopeCollectionName) ?? '');
 
   setTemperature(v: number) { this.temperature = v; safeSet(CHAT_KEYS.temperature, String(v)); }
   setMaxTokens(v: number) { this.maxTokens = v; safeSet(CHAT_KEYS.maxTokens, String(v)); }
@@ -239,15 +287,6 @@ class ChatSettingsStore {
   setAnthropicCaching(v: boolean) { this.anthropicCaching = v; safeSet(CHAT_KEYS.anthropicCaching, v ? '1' : '0'); }
   setAnthropicSystemPrompt(v: string) { this.anthropicSystemPrompt = v; safeSet(CHAT_KEYS.anthropicSystemPrompt, v); }
   resetAnthropicSystemPrompt() { this.setAnthropicSystemPrompt(DEFAULT_ANTHROPIC_SYSTEM); }
-  /** Set chat scope to a specific collection or back to "whole vault"
-   *  (id = '', name = ''). Both fields update together so the picker UI
-   *  stays consistent with what we send to `search_knowledge`. */
-  setChatScope(id: number | '', name: string) {
-    this.chatScopeId = id;
-    this.chatScopeName = name;
-    safeSet(CHAT_KEYS.chatScopeCollectionId, id === '' ? '' : String(id));
-    safeSet(CHAT_KEYS.chatScopeCollectionName, name);
-  }
 }
 
 class SettingsStore {
@@ -283,5 +322,6 @@ Cite sources by their path. Keep answers concise.`
 export const theme = new ThemeStore();
 export const status = new StatusStore();
 export const router = new RouterStore();
+export const collection = new CollectionStore();
 export const settings = new SettingsStore();
 export const chatSettings = new ChatSettingsStore();

@@ -24,6 +24,12 @@ pub struct IngestStats {
 pub struct IngestConfig {
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+    /// When `Some(id)`, every document persisted by this run is added to
+    /// the named collection. `None` means "vault-wide ingest, no
+    /// automatic collection assignment." The id is validated up the
+    /// stack; this struct trusts the caller to have resolved or created
+    /// the collection already.
+    pub collection_id: Option<i64>,
 }
 
 impl Default for IngestConfig {
@@ -31,6 +37,7 @@ impl Default for IngestConfig {
         IngestConfig {
             chunk_size: 512,
             chunk_overlap: 64,
+            collection_id: None,
         }
     }
 }
@@ -56,7 +63,7 @@ pub fn ingest_path(
             path.display()
         );
         progress.emit(ProgressEvent::ArchiveDetected(kind.name().to_string()));
-        let astats = archives::ingest(kind, path, db, embedder, progress)?;
+        let astats = archives::ingest(kind, path, db, embedder, progress, config.collection_id)?;
         return Ok(IngestStats {
             files_seen: astats.records_added + astats.records_skipped,
             records_added: astats.records_added,
@@ -194,7 +201,7 @@ fn ingest_file(
     // header on every chunk past the first.
     if let Some(kind) = archives::detect(path) {
         let progress = progress::Progress::noop();
-        archives::ingest(kind, path, db, embedder, &progress)?;
+        archives::ingest(kind, path, db, embedder, &progress, config.collection_id)?;
         return Ok(true);
     }
 
@@ -205,7 +212,15 @@ fn ingest_file(
     let raw_bytes = std::fs::read(path)?;
     let sha256 = hex_digest(&raw_bytes);
 
+    // Already in the vault. Still honor a caller-supplied collection
+    // so a re-ingest that targets a new collection actually populates
+    // it, instead of silently dropping the assignment.
     if db.document_exists_by_hash(&sha256)? {
+        if let Some(cid) = config.collection_id {
+            if let Some(existing_id) = db.document_id_by_hash(&sha256)? {
+                db.collection_add_documents(cid, std::slice::from_ref(&existing_id))?;
+            }
+        }
         return Ok(false);
     }
 
@@ -231,6 +246,10 @@ fn ingest_file(
         &text,
         &sha256,
     )?;
+
+    if let Some(cid) = config.collection_id {
+        db.collection_add_documents(cid, std::slice::from_ref(&doc_id))?;
+    }
 
     let chunks = chunk_text(&text, config.chunk_size, config.chunk_overlap);
 

@@ -15,6 +15,7 @@ use crate::embed::Embedder;
 use crate::jobs::{JobRegistry, JobStatus};
 use crate::mcp;
 use crate::mcp_proxy::{self, McpServerEntry, McpServersConfig};
+use crate::mdns::{self, MdnsConfig, Responder as MdnsResponder};
 use crate::rag::{self, Database};
 use crate::release::ReleaseCache;
 use crate::tunnel::{TunnelConfig, TunnelManager, TunnelMode};
@@ -47,9 +48,40 @@ pub struct AppState {
     /// Cached GitHub-release probe. One hour TTL — keeps GitHub
     /// round-trips minimal even with several browser tabs open.
     pub release_cache: ReleaseCache,
+    /// Active mDNS responder, when enabled. Wrapped in `Mutex<Option>`
+    /// so the `/api/mdns` POST handler can swap it in/out at runtime
+    /// without restarting the HTTP server.
+    pub mdns: std::sync::Mutex<Option<MdnsResponder>>,
 }
 
 pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: PathBuf) -> Router {
+    // Start mDNS only when the persisted toggle is enabled (default
+    // on) AND we have a real port to advertise. `port == 0` is the
+    // test-router sentinel for "no real bind" — registering mDNS at
+    // port 0 would advertise an unreachable service and the test suite
+    // would also pay for one daemon-spawn per test. A failure here is
+    // non-fatal: the HTTP server still binds and the Connect tab still
+    // works via the LAN IP. We log the error so users on locked-down
+    // networks see why satchel.local is not resolving.
+    let mdns_cfg = MdnsConfig::load(&vault_path).unwrap_or_default();
+    let mdns_initial = if mdns_cfg.enabled && port != 0 {
+        match MdnsResponder::start(port) {
+            Ok(r) => {
+                eprintln!(
+                    "[satchel] mDNS responder up; LAN clients can use http://{}.local:{port}",
+                    mdns::Responder::hostname()
+                );
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("[satchel] mDNS responder failed to start: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         db: Arc::new(db),
         embedder: Arc::new(embedder),
@@ -58,6 +90,7 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
         port,
         vault_path,
         release_cache: ReleaseCache::default(),
+        mdns: std::sync::Mutex::new(mdns_initial),
     });
 
     Router::new()
@@ -120,6 +153,8 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
             "/api/collections/:id/documents",
             post(api_collection_assign_docs).delete(api_collection_unassign_docs),
         )
+        .route("/api/connect-info", get(api_connect_info))
+        .route("/api/mdns", get(api_mdns_get).post(api_mdns_set))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -165,6 +200,9 @@ pub async fn serve(
     eprintln!("[satchel] Web UI:       {url}");
     eprintln!("[satchel] MCP endpoint: {url}/mcp");
     eprintln!("[satchel] REST API:     {url}/api/");
+    // mDNS broadcasting (when enabled) is logged from `build_router`
+    // alongside the satchel.local hostname so users see both lines
+    // before the browser opens.
 
     if open_in_browser {
         let url = url.clone();
@@ -594,6 +632,15 @@ struct IngestRequest {
     chunk_size: Option<usize>,
     #[serde(default)]
     chunk_overlap: Option<usize>,
+    /// Either `collection_id` (resolved numeric id) or
+    /// `collection_name` (user-facing label, auto-created if it does
+    /// not yet exist). When both are present, the id wins. When neither
+    /// is present, the documents are ingested vault-wide with no
+    /// collection assignment.
+    #[serde(default)]
+    collection_id: Option<i64>,
+    #[serde(default)]
+    collection_name: Option<String>,
 }
 
 async fn api_ingest(
@@ -620,19 +667,37 @@ async fn api_ingest(
         return Json(json!({ "error": format!("not found: {}", path.display()) }));
     }
 
-    let config = crate::ingest::IngestConfig {
-        chunk_size: req.chunk_size.unwrap_or(512),
-        chunk_overlap: req.chunk_overlap.unwrap_or(64),
-    };
-
     // Fail fast if there's no embedder — every record would fail otherwise
     // and the user would see "all N records failed" only after a long wait.
+    // Done BEFORE collection resolution so a no-model retry loop does not
+    // leave a trail of empty auto-created collections behind.
     if !state.embedder.is_available() {
         return Json(json!({
             "error": "embedding model unavailable; ingest would fail. Run \
                       ./scripts/download-model.sh or rebuild with --features embed-model"
         }));
     }
+
+    // Resolve the optional collection target. id wins if both are
+    // supplied; a name that doesn't match an existing collection is
+    // created on the fly so the UI's "+ NEW" affordance in the Ingest
+    // form is a single round trip.
+    let collection_id = match (req.collection_id, req.collection_name.as_deref()) {
+        (Some(id), _) => Some(id),
+        (None, Some(name)) if !name.trim().is_empty() => {
+            match resolve_or_create_collection(&state.db, name.trim()) {
+                Ok(id) => Some(id),
+                Err(e) => return Json(json!({ "error": format!("collection: {e}") })),
+            }
+        }
+        _ => None,
+    };
+
+    let config = crate::ingest::IngestConfig {
+        chunk_size: req.chunk_size.unwrap_or(512),
+        chunk_overlap: req.chunk_overlap.unwrap_or(64),
+        collection_id,
+    };
 
     // Register the job and return its id immediately. The actual ingest
     // runs in the background; the UI polls /api/jobs for live counters.
@@ -1260,6 +1325,19 @@ fn forward_streaming_response(upstream: reqwest::Response) -> Response {
 // them over REST.
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Look up a collection by name (case-insensitive), creating one when
+/// no match exists. Mirrors the CLI's `--collection foo` semantic so
+/// `POST /api/ingest { collection_name: "foo" }` is a one-shot
+/// operation from the Ingest tab even on a brand new vault.
+fn resolve_or_create_collection(db: &Database, name: &str) -> anyhow::Result<i64> {
+    for c in db.list_collections()? {
+        if c.name.eq_ignore_ascii_case(name) {
+            return Ok(c.id);
+        }
+    }
+    db.create_collection(name)
+}
+
 async fn api_collections_list(State(state): State<Arc<AppState>>) -> Json<Value> {
     match state.db.list_collections() {
         Ok(rows) => Json(json!({ "collections": rows })),
@@ -1353,4 +1431,121 @@ async fn api_collection_unassign_docs(
         Ok(n) => Json(json!({ "removed": n })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Connect / mDNS — surface the local addresses the running server can be
+// reached at, and let the user toggle mDNS broadcasting on or off.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Best-effort enumeration of non-loopback IPv4 addresses bound to local
+/// interfaces. Returned to the Connect tab so the user can pick the IP
+/// their phone / other laptop should hit when `.local` resolution is
+/// blocked. We rely on `local_ipv4s` via a small helper rather than
+/// pulling in a third-party crate: read `/proc/net/fib_trie` is too
+/// Linux-specific, and `gethostbyname` rules out musl. Instead we
+/// connect a UDP socket to a public IP and ask the OS which local
+/// address it would have used; that is the canonical "outbound" IP and
+/// is enough for the Connect tab. Multi-interface hosts can still see
+/// satchel.local via mDNS.
+fn detect_lan_ipv4() -> Option<std::net::IpAddr> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    // 192.0.2.1 is in TEST-NET-1; no actual packet is sent for `connect`.
+    socket.connect("192.0.2.1:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
+async fn api_connect_info(State(state): State<Arc<AppState>>) -> Json<Value> {
+    // The binary path printed in client-setup snippets. `current_exe`
+    // resolves to the actual on-disk path even when the process was
+    // launched from a .app bundle, which is exactly what users need to
+    // paste into Claude Desktop / Cursor configs.
+    let binary_path = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "satchel".to_string());
+
+    let port = state.port;
+    let local_url = format!("http://127.0.0.1:{port}");
+    let mcp_url = format!("{local_url}/mcp");
+
+    let mdns_enabled = state.mdns.lock().map(|g| g.is_some()).unwrap_or(false);
+    let mdns_host = mdns::Responder::hostname();
+    let mdns_url = if mdns_enabled {
+        Some(format!("http://{mdns_host}.local:{port}"))
+    } else {
+        None
+    };
+    let mdns_mcp_url = mdns_url.as_ref().map(|u| format!("{u}/mcp"));
+
+    let lan_ip = detect_lan_ipv4().map(|ip| ip.to_string());
+    let lan_url = lan_ip.as_ref().map(|ip| format!("http://{ip}:{port}"));
+    let lan_mcp_url = lan_url.as_ref().map(|u| format!("{u}/mcp"));
+
+    Json(json!({
+        "binary_path": binary_path,
+        "port": port,
+        "local_url": local_url,
+        "mcp_url": mcp_url,
+        "lan_ip": lan_ip,
+        "lan_url": lan_url,
+        "lan_mcp_url": lan_mcp_url,
+        "mdns": {
+            "enabled": mdns_enabled,
+            "hostname": format!("{mdns_host}.local"),
+            "url": mdns_url,
+            "mcp_url": mdns_mcp_url,
+        },
+    }))
+}
+
+async fn api_mdns_get(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let cfg = MdnsConfig::load(&state.vault_path).unwrap_or_default();
+    let running = state.mdns.lock().map(|g| g.is_some()).unwrap_or(false);
+    Json(json!({
+        "enabled": cfg.enabled,
+        "running": running,
+        "hostname": format!("{}.local", mdns::Responder::hostname()),
+    }))
+}
+
+#[derive(Deserialize)]
+struct SetMdnsRequest {
+    enabled: bool,
+}
+
+async fn api_mdns_set(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetMdnsRequest>,
+) -> Json<Value> {
+    // Persist the toggle first so a crash mid-flip still reflects the
+    // user's intent on next launch.
+    let cfg = MdnsConfig {
+        enabled: req.enabled,
+    };
+    if let Err(e) = cfg.save(&state.vault_path) {
+        return Json(json!({ "error": format!("save mdns config: {e}") }));
+    }
+
+    let mut guard = match state.mdns.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if req.enabled {
+        if guard.is_none() {
+            match MdnsResponder::start(state.port) {
+                Ok(r) => *guard = Some(r),
+                Err(e) => return Json(json!({ "error": format!("start mdns: {e}") })),
+            }
+        }
+    } else if let Some(r) = guard.take() {
+        r.shutdown();
+    }
+
+    Json(json!({
+        "enabled": req.enabled,
+        "running": guard.is_some(),
+        "hostname": format!("{}.local", mdns::Responder::hostname()),
+    }))
 }

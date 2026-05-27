@@ -65,6 +65,7 @@ pub fn ingest(
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<ArchiveStats> {
     let users = load_users(&path.join("users.json"))?;
     let channels = load_channels(&path.join("channels.json"))?;
@@ -115,7 +116,16 @@ pub fn ingest(
             .unwrap_or("unknown")
             .to_string();
 
-        match process_day(p, &channel, &users, &channels, db, embedder, progress) {
+        match process_day(
+            p,
+            &channel,
+            &users,
+            &channels,
+            db,
+            embedder,
+            progress,
+            collection_id,
+        ) {
             Ok((added, skipped)) => {
                 stats.records_added += added;
                 stats.records_skipped += skipped;
@@ -175,6 +185,7 @@ fn load_channels(path: &Path) -> Result<HashMap<String, String>> {
 /// without merging unrelated messages from later in the day.
 const BURST_GAP_SECS: f64 = 90.0;
 
+#[allow(clippy::too_many_arguments)]
 fn process_day(
     path: &Path,
     channel: &str,
@@ -183,6 +194,7 @@ fn process_day(
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<(usize, usize)> {
     let bytes = std::fs::read(path)?;
     let messages: Vec<Value> = match serde_json::from_slice(&bytes) {
@@ -278,7 +290,7 @@ fn process_day(
             body,
         };
 
-        if persist_record(&record, "slack", db, embedder, progress)? {
+        if persist_record(&record, "slack", db, embedder, progress, collection_id)? {
             added += 1;
         } else {
             skipped += 1;

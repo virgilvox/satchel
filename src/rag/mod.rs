@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -938,6 +938,22 @@ impl Database {
             |r| r.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Look up the `documents.id` for a content hash. Used by the
+    /// ingest pipeline so that a re-ingest into a new collection still
+    /// joins the existing (dedup-skipped) document to the requested
+    /// collection. Returns `Ok(None)` when no matching row exists.
+    pub fn document_id_by_hash(&self, sha256: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM documents WHERE sha256 = ?1",
+                params![sha256],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id)
     }
 
     pub fn delete_document(&self, source: &str) -> Result<()> {

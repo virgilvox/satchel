@@ -25,6 +25,7 @@ pub fn ingest(
     db: &Database,
     embedder: &Embedder,
     progress: &Progress,
+    collection_id: Option<i64>,
 ) -> Result<ArchiveStats> {
     let convo_path = path.join("conversations.json");
     let bytes = std::fs::read(&convo_path)?;
@@ -102,7 +103,7 @@ pub fn ingest(
             title: format!("Claude.ai: {title}"),
             body,
         };
-        if persist_record(&record, "claude.ai", db, embedder, progress)? {
+        if persist_record(&record, "claude.ai", db, embedder, progress, collection_id)? {
             stats.records_added += 1;
         } else {
             stats.records_skipped += 1;

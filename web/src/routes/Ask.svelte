@@ -3,15 +3,14 @@
   import Mark from '../components/Mark.svelte';
   import Composer from '../components/Composer.svelte';
   import MessageBubble from '../components/MessageBubble.svelte';
-  import CollectionScope from '../components/CollectionScope.svelte';
   import { api } from '../lib/api';
+  import { collection } from '../lib/stores.svelte';
   import type { ChatMessage, ToolCallResult } from '../lib/types';
 
   let transcript = $state<ChatMessage[]>([]);
   let busy = $state(false);
-  let scope: number | '' = $state('');
   const ASK_LIMIT = 5;
-  const scopeId = () => (scope === '' ? undefined : (scope as number));
+  const scopeId = () => collection.activeId ?? undefined;
 
   const examples = [
     'recent decisions about hiring',
@@ -78,9 +77,11 @@
 </script>
 
 <ViewHead num="02" title={`ASK <span class="slash">/</span> CONVERSATIONAL SEARCH`}
-  desc="Phrase a question; the vault answers with the most relevant passages. Pure retrieval — no LLM." />
+  desc="Phrase a question; the vault answers with the most relevant passages. Pure retrieval; no LLM." />
 
-<CollectionScope bind:value={scope} />
+{#if collection.activeName}
+  <p class="scope-readout">scoped to <strong>{collection.activeName}</strong>; change in the top bar</p>
+{/if}
 
 <div class="stream" bind:this={stream}>
   {#if transcript.length === 0}
@@ -108,6 +109,17 @@
 />
 
 <style>
+  .scope-readout {
+    margin: 10px 0 0;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .scope-readout strong {
+    color: var(--amber);
+    font-weight: 700;
+  }
   .stream {
     display: flex;
     flex-direction: column;

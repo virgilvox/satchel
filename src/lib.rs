@@ -4,6 +4,7 @@ pub mod ingest;
 pub mod jobs;
 pub mod mcp;
 pub mod mcp_proxy;
+pub mod mdns;
 pub mod rag;
 pub mod release;
 pub mod server;

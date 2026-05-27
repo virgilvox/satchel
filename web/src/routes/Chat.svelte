@@ -21,9 +21,8 @@
     parseConstrainedOutput,
   } from '../lib/agent';
   import { McpClient } from '../lib/mcp';
-  import CollectionScope from '../components/CollectionScope.svelte';
   import { api } from '../lib/api';
-  import { settings, chatSettings } from '../lib/stores.svelte';
+  import { collection, settings, chatSettings } from '../lib/stores.svelte';
   import type { ChatMessage, McpTool, ToolCallResult } from '../lib/types';
   import {
     CHAT_MODELS,
@@ -79,19 +78,22 @@
   let contextFull = $state(false);
 
   // Auto-inject the user's chosen collection scope into search_knowledge
-  // tool calls. The LLM is allowed to override (if it explicitly passes
-  // collection_name or collection_id, we keep its choice). For "whole
-  // vault" (chatScopeName === ''), we pass through unchanged.
+  // tool calls. Reads from the global collection store (driven by the
+  // TopBar scope chip), so chat results stay consistent with what the
+  // user sees on Search and Ask. The LLM is allowed to override: if it
+  // explicitly passes collection_name or collection_id, we keep its
+  // choice. For "whole vault" (no active scope) we pass through
+  // unchanged.
   function applyScopeToToolArgs(
     name: string,
     args: Record<string, unknown>
   ): Record<string, unknown> {
     if (name !== 'search_knowledge') return args;
-    const scope = chatSettings.chatScopeName;
-    if (!scope) return args;
+    const scopeName = collection.activeName;
+    if (!scopeName) return args;
     if (typeof args.collection_name === 'string' && args.collection_name) return args;
     if (typeof args.collection_id === 'number') return args;
-    return { ...args, collection_name: scope };
+    return { ...args, collection_name: scopeName };
   }
 
   // Cumulative Anthropic prompt-cache hit count for the current chat.
@@ -881,27 +883,11 @@
   </div>
 </div>
 
-<CollectionScope
-  value={chatSettings.chatScopeId}
-  onchange={async (id) => {
-    if (id === '') {
-      chatSettings.setChatScope('', '');
-      return;
-    }
-    // Resolve the chosen id to its display name so we can pass
-    // `collection_name` (the user-facing identifier) to
-    // `search_knowledge`. One small REST round-trip per change.
-    try {
-      const r = await api.collectionsList();
-      const found = (r.collections ?? []).find((c) => c.id === id);
-      if (found) chatSettings.setChatScope(id, found.name);
-    } catch {
-      // Network blip; keep the id but blank the name. The next chat
-      // turn will fall back to "whole vault" which is a safe default.
-      chatSettings.setChatScope(id, '');
-    }
-  }}
-/>
+{#if collection.activeName}
+  <p class="scope-readout">
+    search_knowledge calls scoped to <strong>{collection.activeName}</strong>; change in the top bar
+  </p>
+{/if}
 
 {#if contextFull}
   <div class="ctx-banner">
@@ -1033,6 +1019,17 @@
 />
 
 <style>
+  .scope-readout {
+    margin: 6px 0 14px;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .scope-readout strong {
+    color: var(--amber);
+    font-weight: 700;
+  }
   .strip {
     display: flex;
     align-items: center;

@@ -159,14 +159,16 @@ Then in claude.ai → Settings → Connectors → Add Custom Connector, point it
 
 Running `./satchel` with no arguments starts the web interface at [http://localhost:7428](http://localhost:7428):
 
+A **SCOPE** chip in the top bar picks the active collection; every scoped view follows it (`ALL` means whole vault).
+
 - **Dashboard** — vault stats, quick search, embedding-model status.
-- **Ask** — conversational entry to the vault. Phrase a question; a tool-call card runs `search_knowledge` and returns the top passages with source attribution. Scope-chip row above the input pins the query to a single collection or runs against the whole vault. Pure retrieval — no LLM, no network roundtrip.
-- **Chat** — picker spans two backends. **Local · WebLLM** runs a small model (Llama 3.2 1B/3B, Hermes 3, Qwen 2.5, Phi 3.5, Gemma 2, DeepSeek R1, …) entirely in your browser via WebGPU; output is locked to a per-tool JSON schema by an XGrammar logit mask. **Anthropic API** (Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5) streams through a server-side proxy with your saved API key — see *Settings → Anthropic API*. Tool calls go to the same MCPs either way. Reasoning blocks emitted as `<think>…</think>` render in a collapsible panel; tool calls render compact (collapsed by default) and expand on click.
-- **Search** — full hybrid retrieval with score ranking. Same scope-chip row as Ask narrows the query to a single collection.
-- **Documents** — browse ingested files. Group sources into **collections** (named subsets like "Work", "Research", "Personal"), filter by collection with a tab strip, multi-select rows + bulk move into a collection.
-- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. Multiple folders run concurrently with live progress (files seen, records added/skipped/failed, current file, elapsed time).
+- **Ask** — conversational entry to the vault. Phrase a question; a tool-call card runs `search_knowledge` and returns the top passages with source attribution. Pure retrieval, no LLM, no network roundtrip. Follows the top-bar scope.
+- **Chat** — picker spans two backends. **Local, WebLLM** runs a small model (Llama 3.2 1B/3B, Hermes 3, Qwen 2.5, Phi 3.5, Gemma 2, DeepSeek R1) entirely in your browser via WebGPU; output is locked to a per-tool JSON schema by an XGrammar logit mask. **Anthropic API** (Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5) streams through a server-side proxy with your saved API key, see *Settings → Anthropic API*. Tool calls go to the same MCPs either way. Reasoning blocks emitted as `<think>…</think>` render in a collapsible panel; tool calls render compact (collapsed by default) and expand on click. `search_knowledge` calls are auto-scoped by the top-bar chip.
+- **Search** — full hybrid retrieval with score ranking. Scoped by the top-bar chip.
+- **Documents** — browse ingested files. Group sources into **collections** (named subsets like "Work", "Research", "Personal"); the tab strip is both a scope picker and the create/delete management surface. Multi-select rows and bulk move into a collection.
+- **Ingest** — paste a path or use the Browse modal to pick a folder; archives are auto-detected. A destination block above the path input picks the target collection (follow the top-bar scope, no collection, pin to a specific one, or type a new name to create). Multiple folders run concurrently with live progress.
 - **Manage** — delete documents by path prefix or file type, or wipe the vault.
-- **Connect** — one-click public tunnel via bundled `cloudflared` (anonymous quick tunnel or your own named tunnel from Cloudflare Zero Trust), plus config snippets for Claude Desktop, Claude Code, Cursor, claude.ai web.
+- **Connect** — leads with the live local MCP URL, the `satchel.local` URL (when mDNS is on), and the LAN-IP URL, each with a one-click COPY. Per-client setup snippets for Claude Desktop, Claude Code, Cursor, and claude.ai web have the binary path auto-filled. A tunnel panel at the bottom publishes a public URL via bundled `cloudflared`.
 
 Settings (gear icon in the chat strip) carries:
 - generation knobs (temperature, max_tokens, max_rounds), agent backstops (min_tool_calls, weak_score_threshold), context window + sliding window, persistence toggles
@@ -186,25 +188,41 @@ Release downloads bundle the per-platform `cloudflared` binary so it works out o
 
 > ⚠️ A live tunnel exposes your vault on the public internet. Anyone with the URL can hit `/api/search` and `/mcp`. Destructive endpoints (`/api/clear`, `/api/sources DELETE`) require an explicit `{"confirm": true}` so a stray request can't silently wipe the vault, but the read surface is open. Stop the tunnel when you're done.
 
+## satchel.local on your LAN
+
+The running HTTP server advertises itself over Multicast DNS so any other device on the same network can reach it at `http://satchel.local:7428` without knowing the IP. Pure Rust, no system daemon needed.
+
+- **macOS** resolves `satchel.local` natively through mDNSResponder. Works out of the box.
+- **Windows 10 and newer** resolve through the built-in DNS client. Works out of the box.
+- **Linux desktops** that ship `nss-mdns` (Ubuntu desktop) or `avahi-daemon` resolve out of the box. Server installs may need `sudo apt install avahi-daemon` first.
+
+Toggle on the Connect tab if you would rather not broadcast on a given network. Persisted at `<vault>/mdns.toml`; off-by-default behavior persists across restarts. The Connect tab also shows the loopback URL (`http://127.0.0.1:7428`) and the LAN IP URL as fallbacks for environments where `.local` resolution is blocked.
+
 ## Collections
 
-Group ingested sources into named subsets (a "Work" collection, a "Research" collection, a "Personal" collection) and scope retrieval to whichever you want — Documents (tab strip), Search and Ask (chip row), or AI agents through the MCP. Documents stay in the vault when a collection is deleted — only the membership goes.
+Group ingested sources into named subsets (a "Work" collection, a "Research" collection, a "Personal" collection) and scope every view in the app to one. Documents stay in the vault when a collection is deleted; only the membership goes.
 
-- **Documents** tab strip shows tabs for every collection + an `ALL` view, with multi-select rows and a bulk **move to collection** / **remove from collection** modal.
-- **Search** and **Ask** show a `scope` chip row above the input. Switching scope re-runs the active query.
+Pick a scope once from the **SCOPE** chip in the top bar and Search, Ask, Chat, Documents, and the Ingest tab's default destination all follow it. `ALL` means whole vault. Each scoped view also shows a small "scoped to X; change in the top bar" readout so the chip is discoverable.
+
+- **Documents** tab is the management surface: create, delete, multi-select rows, bulk **move to collection** / **remove from collection**. The tab strip also acts as a scope picker; changing it updates the top-bar chip.
+- **Ingest** has a destination block above the path input. Pick *follow the top-bar scope* (default), *no collection*, *pin to a specific collection*, or type a **new collection name** and the server creates it before the job starts.
+- **CLI**: `satchel ingest -c <name> <path>` assigns every ingested document to the named collection. Auto-creates if the name does not yet exist.
 - **MCP** has `list_collections` for discovery and `search_knowledge` accepts `collection_name` (preferred) or `collection_id` for autonomous scoping.
 
+Re-ingesting an already-known document into a new collection joins the existing document to the requested collection (hash dedup still skips re-embedding the body).
+
 REST surface:
-- `GET /api/collections` — list with `document_count`
-- `POST /api/collections` — `{name}` to create
-- `DELETE /api/collections/:id` — drop the collection (cascades through `document_collections`; documents untouched)
-- `POST /api/collections/:id/sources` — `{source_paths: [...]}` to assign
-- `DELETE /api/collections/:id/sources` — same body, to unassign
-- `GET /api/sources?collection_id=N` — filter the existing sources index
-- `POST /api/search { ..., collection_id: N }` — scope retrieval to a collection (v1.6.1+)
+- `GET /api/collections` returns the list with `document_count`
+- `POST /api/collections` with `{name}` creates a collection
+- `DELETE /api/collections/:id` drops the collection (cascades through `document_collections`; documents untouched)
+- `POST /api/collections/:id/sources` with `{source_paths: [...]}` assigns
+- `DELETE /api/collections/:id/sources` with the same body unassigns
+- `GET /api/sources?collection_id=N` filters the sources index
+- `POST /api/search { ..., collection_id: N }` scopes retrieval
+- `POST /api/ingest { path, collection_id }` or `{ path, collection_name }` assigns on ingest; `collection_name` auto-creates when missing
 
 MCP surface (v1.6.1+):
-- `search_knowledge` accepts `collection_name` (preferred — the user-facing label) or `collection_id`. An unknown `collection_name` returns a tool error so the agent can correct.
+- `search_knowledge` accepts `collection_name` (preferred, the user-facing label) or `collection_id`. An unknown `collection_name` returns a tool error so the agent can correct.
 - `list_collections` enumerates the collections so the agent can discover names before scoping a query.
 
 ## Supported File Types
@@ -280,6 +298,9 @@ When connected, your AI client can use these tools:
 ## Managing Your Data
 
 ```bash
+satchel ingest <path>                       # ingest a file or directory
+satchel ingest -c work <path>               # ingest into the "work" collection (auto-creates)
+satchel ingest --watch <path>               # auto-ingest on filesystem changes
 satchel delete <path>                       # exact source path
 satchel delete --prefix "HeatSync Slack"    # everything under that prefix
 satchel delete --type json                  # all .json documents

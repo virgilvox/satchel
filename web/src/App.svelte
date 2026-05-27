@@ -13,7 +13,7 @@
   import Manage from './routes/Manage.svelte';
   import Connect from './routes/Connect.svelte';
 
-  import { router, status } from './lib/stores.svelte';
+  import { collection, router, status } from './lib/stores.svelte';
   import { api } from './lib/api';
 
   let activeJobs = $state(0);
@@ -36,14 +36,27 @@
     } catch {}
   }
 
+  async function pollCollections() {
+    try {
+      const r = await api.collectionsList();
+      if (!r.error) collection.setList(r.collections ?? []);
+    } catch {}
+  }
+
   $effect(() => {
     poll();
     pollJobs();
+    pollCollections();
     const t1 = window.setInterval(poll, 30_000);
     const t2 = window.setInterval(pollJobs, 5_000);
+    // Collections rarely change; refresh on a long cadence so a tab
+    // that's been open for hours catches up with new collections
+    // created in another tab without burning fetch budget.
+    const t3 = window.setInterval(pollCollections, 30_000);
     return () => {
       clearInterval(t1);
       clearInterval(t2);
+      clearInterval(t3);
     };
   });
 </script>

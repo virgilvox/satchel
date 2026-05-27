@@ -3,6 +3,7 @@
   import Dot from './Dot.svelte';
   import Pill from './Pill.svelte';
   import ModeToggle from './ModeToggle.svelte';
+  import ScopeChip from './ScopeChip.svelte';
   import { status } from '../lib/stores.svelte';
 
   let label = $derived.by(() => {
@@ -24,6 +25,7 @@
     <span class="sub">HOST-FREE EMBEDDED LOOKUP</span>
   </div>
   <div class="right">
+    <ScopeChip />
     <Pill tone={tone === 'danger' ? 'danger' : tone === 'amber' ? 'amber' : 'teal'}>
       <Dot tone={tone} pulse={!status.data} />
       <span>{label}</span>

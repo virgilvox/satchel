@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import ViewHead from '../components/ViewHead.svelte';
   import { api, type CollectionSummary } from '../lib/api';
+  import { collection } from '../lib/stores.svelte';
   import type { DocumentRow, FileTypeStat, SourceRow } from '../lib/types';
 
   // ─── view mode ───
@@ -17,7 +18,14 @@
   let q = $state('');
   let type = $state('');
   let sort = $state('name');
-  let collectionId: number | '' = $state('');
+  // Documents-tab scope is bound to the global active collection. The
+  // tab strip below acts as both the management UI (create / delete)
+  // and a scope picker; flipping a tab updates the TopBar chip and
+  // every other view at once.
+  let collectionId: number | '' = $derived(collection.activeId ?? '');
+  function setScope(id: number | '') {
+    collection.setActive(id === '' ? null : id);
+  }
   let sources = $state<SourceRow[]>([]);
   let documents = $state<DocumentRow[]>([]);
   let total = $state(0);
@@ -115,7 +123,12 @@
 
   async function loadCollections() {
     const r = await api.collectionsList();
-    if (!r.error) collections = r.collections ?? [];
+    if (!r.error) {
+      collections = r.collections ?? [];
+      // Push into the global store so the TopBar chip reflects new /
+      // renamed collections without waiting for its polling tick.
+      collection.setList(collections);
+    }
   }
 
   function onQ(e: Event) {
@@ -138,6 +151,21 @@
     load();
     loadTypes();
     loadCollections();
+  });
+
+  // When the global scope changes (TopBar chip, another tab, deletion
+  // fallback), refresh the table. The initial onMount load() handles
+  // the first paint; this effect handles every subsequent change.
+  let didMount = false;
+  $effect(() => {
+    void collection.activeId;
+    if (!didMount) {
+      didMount = true;
+      return;
+    }
+    selectedSources = new Set();
+    selectedDocs = new Set();
+    load();
   });
 
   let rowCount = $derived(viewMode === 'source' ? sources.length : documents.length);
@@ -218,7 +246,7 @@
       bulkError = r.error;
       return;
     }
-    if (collectionId === id) collectionId = '';
+    if (collection.activeId === id) collection.setActive(null);
     await loadCollections();
     await load();
   }
@@ -274,13 +302,13 @@
   <div class="collections-tabs" role="tablist">
     <button class="ctab" type="button"
       class:active={collectionId === ''}
-      onclick={() => { collectionId = ''; load(); }}>
+      onclick={() => { setScope(''); load(); }}>
       ALL <span class="count">{allTabCount}</span>
     </button>
     {#each collections as c (c.id)}
       <button class="ctab" type="button"
         class:active={collectionId === c.id}
-        onclick={() => { collectionId = c.id; load(); }}>
+        onclick={() => { setScope(c.id); load(); }}>
         {c.name}
         <span class="count">{c.document_count}</span>
         <span class="x" role="button" aria-label="Delete collection"

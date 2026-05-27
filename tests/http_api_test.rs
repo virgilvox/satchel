@@ -43,6 +43,47 @@ async fn post_json(uri: &str, body: &str) -> (u16, serde_json::Value) {
     (status, json)
 }
 
+/// Send a GET through a specific router. Use this when a test makes
+/// multiple requests that need to share state; the bare `get(..)`
+/// helper builds a fresh app each call and would silently lose
+/// in-memory DB state between requests. `Router` is `Clone` and
+/// `oneshot` consumes its service, so we clone per call here.
+async fn get_on(app: &axum::Router, uri: &str) -> (u16, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&body)
+        .unwrap_or(serde_json::json!({"_raw": String::from_utf8_lossy(&body).to_string()}));
+    (status, json)
+}
+
+async fn post_on(app: &axum::Router, uri: &str, body: &str) -> (u16, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = if bytes.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}))
+    };
+    (status, json)
+}
+
 #[tokio::test]
 async fn test_get_root_returns_html() {
     let resp = app()
@@ -125,6 +166,149 @@ async fn test_post_mcp_notification_returns_accepted() {
     )
     .await;
     assert_eq!(status, 202);
+}
+
+#[tokio::test]
+async fn test_get_api_connect_info() {
+    // Connect tab consumes this on mount. The shape is contractual:
+    // the UI assumes binary_path, port, mcp_url and mdns.{enabled,
+    // hostname} all exist.
+    let (status, json) = get("/api/connect-info").await;
+    assert_eq!(status, 200);
+    assert!(json["binary_path"].is_string());
+    assert_eq!(json["port"], 0); // test router port sentinel
+    assert!(json["mcp_url"].as_str().unwrap().contains("/mcp"));
+    assert_eq!(json["mdns"]["hostname"], "satchel.local");
+    // mDNS is not started in tests (port == 0 skips startup), so
+    // running is false but enabled may be either depending on the
+    // test-vault config. The structural keys must exist either way.
+    assert!(json["mdns"]["enabled"].is_boolean());
+}
+
+#[tokio::test]
+async fn test_get_api_mdns_returns_state() {
+    // The Connect tab's toggle is driven by this endpoint's shape;
+    // pin enabled + running + hostname so a future refactor that
+    // renames or drops any of them is caught.
+    let (status, json) = get("/api/mdns").await;
+    assert_eq!(status, 200);
+    assert!(json["enabled"].is_boolean());
+    assert!(json["running"].is_boolean());
+    assert_eq!(json["hostname"], "satchel.local");
+}
+
+#[tokio::test]
+async fn test_post_api_mdns_toggle_off_persists() {
+    // POST {enabled:false} must (a) not error out (b) reflect the
+    // change in the same router's GET response. Port-0 test router
+    // never started a daemon, so this exercises the persist-toggle
+    // path even though there is nothing to shut down.
+    //
+    // We reuse one router across both calls because the toggle is
+    // persisted to disk under the test vault; the in-process Mutex
+    // state would otherwise reset between fresh routers.
+    let app = app();
+    let (s1, j1) = post_on(&app, "/api/mdns", r#"{"enabled":false}"#).await;
+    assert_eq!(s1, 200);
+    assert_eq!(j1["enabled"], false);
+    let (s2, j2) = get_on(&app, "/api/mdns").await;
+    assert_eq!(s2, 200);
+    assert_eq!(j2["enabled"], false);
+    // Restore the default so a subsequent test on the same vault dir
+    // does not inherit the disabled state. The test vault path is
+    // shared per-pid in test_router(), so a polluted state would
+    // affect the next run of `cargo test`.
+    let _ = post_on(&app, "/api/mdns", r#"{"enabled":true}"#).await;
+}
+
+fn collection_names(j: &serde_json::Value) -> Vec<String> {
+    j["collections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_post_api_ingest_creates_collection_by_name() {
+    // The Ingest tab's "create a new collection for this job" field
+    // POSTs `collection_name`. The server must (a) accept it,
+    // (b) auto-create the collection, (c) queue the job. We re-use
+    // one router for the round-trip so the in-memory DB persists
+    // between the ingest call and the collections-list verification.
+    let app = app();
+
+    let (_, before) = get_on(&app, "/api/collections").await;
+    assert!(!collection_names(&before)
+        .iter()
+        .any(|n| n == "fresh-collection"));
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"smoke test contents").unwrap();
+    let body = format!(
+        r#"{{"path":{:?},"collection_name":"fresh-collection"}}"#,
+        tmp.path().to_string_lossy()
+    );
+    let (status, j) = post_on(&app, "/api/ingest", &body).await;
+    assert_eq!(status, 200);
+    // The fixed test embedder reports is_available()==true, so the
+    // ingest proceeds and a job_id is returned; the worker runs in
+    // the background and the collection is created up-front before
+    // the worker spawns. We do not wait for the worker to finish;
+    // collection creation is synchronous in the request handler.
+    assert!(
+        j.get("job_id").is_some() || j.get("error").is_some(),
+        "unexpected ingest response shape: {j}"
+    );
+
+    let (_, after) = get_on(&app, "/api/collections").await;
+    assert!(
+        collection_names(&after)
+            .iter()
+            .any(|n| n == "fresh-collection"),
+        "collection 'fresh-collection' should have been auto-created, got {:?}",
+        collection_names(&after)
+    );
+}
+
+#[tokio::test]
+async fn test_post_api_ingest_rejects_missing_path_without_creating_collection() {
+    // The path-not-found branch errors out BEFORE the embedder check
+    // and before collection resolution, so a missing path with a
+    // brand-new collection_name must NOT create the collection.
+    // Critical: tests the ordering of validation in api_ingest.
+    let app = app();
+
+    let (_, before) = get_on(&app, "/api/collections").await;
+    assert!(!collection_names(&before)
+        .iter()
+        .any(|n| n == "phantom-collection"));
+
+    let (status, j) = post_on(
+        &app,
+        "/api/ingest",
+        r#"{"path":"/definitely/does/not/exist/anywhere","collection_name":"phantom-collection"}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found"),
+        "expected 'not found' error, got {j}"
+    );
+
+    let (_, after) = get_on(&app, "/api/collections").await;
+    assert!(
+        !collection_names(&after)
+            .iter()
+            .any(|n| n == "phantom-collection"),
+        "missing-path ingest must NOT leave a stray collection behind, got {:?}",
+        collection_names(&after)
+    );
 }
 
 #[tokio::test]
