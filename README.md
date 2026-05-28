@@ -301,7 +301,7 @@ When connected, your AI client can use these tools.
 
 | Tool | What it does |
 |------|-------------|
-| `add_to_vault` | Save a text snippet, markdown document, or any other textual content. Goes through the same chunk + embed + index pipeline as file ingest, so MCP-added notes behave identically in search and `get_chunk_context`. Accepts `title`, `source` (defaults to `mcp://note/<uuid>`), `file_type`, `tags`, `collection_name` (auto-created), and `dry_run`. 5 MB cap; SHA-256 dedup so a re-save is a safe no-op (still honors collection_name and tags). |
+| `add_to_vault` | Save a text snippet, markdown document, or any other textual content. Goes through the same chunk + embed + index pipeline as file ingest, so MCP-added notes behave identically in search and `get_chunk_context`. Accepts `title`, `source` (defaults to `mcp://note/<uuid>`), `file_type`, `tags`, `collection_name` (auto-created), and `dry_run`. **50 MB cap** (v2.8.1+); large pastes over ~10 MB block the tool call for a few minutes while every chunk is embedded, so the model is told to warn the user first. For payloads bigger than 50 MB, save the file on disk and use `satchel ingest <path>` so the work runs as a tracked background job. SHA-256 dedup means a re-save is a safe no-op (still honors `collection_name` and `tags` so re-issuing into a new collection populates it). |
 | `create_collection` | Pre-create a named collection. Idempotent on case-insensitive match. |
 | `assign_to_collection` | Add existing documents (by `document_id`) to a named collection. Auto-creates the collection if missing. Unknown ids are silently dropped and reported in the response. Cap of 200 ids per call. |
 
@@ -341,7 +341,7 @@ POST   /api/clear               Wipe vault (requires {"confirm": true})
 POST   /mcp                     MCP Streamable HTTP endpoint
 ```
 
-All endpoints return JSON. CORS is enabled.
+All endpoints return JSON. CORS is enabled. The request body limit is 64 MB (v2.8.1+) so `POST /mcp` `add_to_vault` calls and `POST /api/ingest` paths can carry full-sized payloads even over a tunnel.
 
 ## Contributing
 
