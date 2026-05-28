@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.7.1 (2026-05-27)
+
+### npm packaging fix for macOS
+
+`npm install satchel-rag@2.7.0` ran cleanly on Linux and Windows but the
+macOS binary was immediately killed with SIGKILL on first invocation.
+The release script extracts the inner `Satchel.app/Contents/MacOS/satchel`
+out of the signed `.app` bundle and ships it bare; macOS still sees the
+embedded Developer ID signature but the bundle's resource manifest is
+gone, so code-signature verification rejects the binary and the kernel
+kills it before it can print anything.
+
+v2.7.1 adds a tiny `postinstall.js` to the darwin platform packages
+(`satchel-rag-darwin-arm64`, `satchel-rag-darwin-x64`) that runs
+`codesign -s - --force` on install. The binary is re-stamped with an
+ad-hoc signature, which is exactly what `cargo install` produces
+locally and what macOS accepts for non-Gatekeeper invocation paths.
+No-op on Linux/Windows.
+
+The 2.7.0 npm packages have been deprecated on the registry pointing
+to 2.7.1.
+
+No Rust changes; the Cargo.toml bump to 2.7.1 keeps the
+binary's reported `--version` aligned across all distribution
+channels (cargo, npm, GitHub releases).
+
 ## v2.7.0 (2026-05-27)
 
 ### Collections become the app's primary scope

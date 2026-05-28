@@ -6,12 +6,17 @@ const { execFileSync } = require("child_process");
 const path = require("path");
 const os = require("os");
 
+// Maps `${os.platform()}-${os.arch()}` to the platform package name
+// that ships the SATCHEL binary for that pair. Unscoped names because
+// npm does not let CLI tools claim a brand new org scope.
+// The "win32" key maps to `satchel-rag-windows-x64` because npm's
+// spam filter blocks new packages whose names contain "win32".
 const PLATFORMS = {
-  "darwin-arm64": "@satchel-rag/darwin-arm64",
-  "darwin-x64": "@satchel-rag/darwin-x64",
-  "linux-arm64": "@satchel-rag/linux-arm64",
-  "linux-x64": "@satchel-rag/linux-x64",
-  "win32-x64": "@satchel-rag/win32-x64",
+  "darwin-arm64": "satchel-rag-darwin-arm64",
+  "darwin-x64": "satchel-rag-darwin-x64",
+  "linux-arm64": "satchel-rag-linux-arm64",
+  "linux-x64": "satchel-rag-linux-x64",
+  "win32-x64": "satchel-rag-windows-x64",
 };
 
 function getBinaryPath() {
