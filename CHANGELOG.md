@@ -1,5 +1,57 @@
 # Changelog
 
+## v2.9.1 (2026-05-28)
+
+### v2.9.0 audit fix pack
+
+The post-ship audit caught three real gaps:
+
+1. **Settings UI gap.** The SMART AGENT MODE block lived only in the
+   `cloud` tab. WebLLM users land on `local` and could not see the
+   toggle. v2.9.1 lifts the block into a `{#snippet smartMode()}`
+   at component-template scope and renders it inside both tab
+   bodies via `{@render smartMode()}`. The exact users the feature
+   targets can now reach the toggle.
+
+2. **Anthropic loop parity.** `runLoop` (WebLLM) got stall + context-
+   full detection in v2.9.0 but `runAnthropicLoop` did not.
+   Anthropic's bigger context makes stall less catastrophic, but
+   loop-stuck Sonnet/Opus burns API dollars and produces a worse
+   answer too. v2.9.1 wires the same hashing + `detectStallPattern`
+   in the Anthropic loop, fingerprinting the whole tool_uses set per
+   turn (Anthropic can emit multiple in one turn).
+
+3. **`auto_compact` was a stub.** The toggle was stored but inert in
+   v2.9.0; the CHANGELOG was honest about it but the UI hid the
+   row. v2.9.1 ships the real implementation in both
+   `buildMessagesForLLM` and `buildAnthropicMessages`:
+   - Counts completed tool-pair messages in the transcript.
+   - When `smart_mode + auto_compact + context >= 65%` are all true
+     AND there are more than two pairs, the oldest are emitted as
+     `[compacted earlier search_knowledge call: <summary> (orig
+     1240 chars)]` instead of the full tool body.
+   - Summary prefers the NEXT round's reasoning (which usually
+     describes what the model learned), falling back to this
+     round's pre-call thought, then a generic placeholder.
+   - The most recent two tool calls and the system prompt are
+     always preserved verbatim so fresh evidence is intact.
+   - On Anthropic the trigger almost never fires (200K window) but
+     parity matters and the heaviest sessions still benefit.
+
+   The `auto_compact` Settings row is restored, alongside
+   `smart_mode` and `tool_result_max_tokens`.
+
+### README
+
+Brief mention of Smart Mode in the Chat tab tour, including the
+v2.9.1 auto-compact addition.
+
+### Tests
+
+26 Vitest TS tests cover the new helpers; the loop integration
+itself is exercised manually. No regressions; 261 Rust + 26 TS = 287
+total still passing.
+
 ## v2.9.0 (2026-05-28)
 
 ### Smart agent mode for local LLMs (and Anthropic too)

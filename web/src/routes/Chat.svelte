@@ -622,7 +622,20 @@
     const out: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }> = [];
     out.push({ role: 'system', content: systemPrompt });
 
-    for (const m of transcript) {
+    // v2.9.1: in-loop transcript compaction. When the user enables
+    // auto_compact AND context use has crossed 65% of the model's
+    // window, the OLDEST completed tool exchanges (beyond the most
+    // recent two) get their full bodies replaced with one-line
+    // summaries lifted from the model's subsequent reasoning. The
+    // model still sees the structural envelope (so the in-context
+    // examples stay consistent) but the bulk text is freed for the
+    // answer round. Per the audit, this is intentionally bypassed
+    // when smart_mode is off OR auto_compact is off OR context is
+    // not yet under pressure.
+    const compactSet = computeCompactSet();
+
+    for (let i = 0; i < transcript.length; i++) {
+      const m = transcript[i];
       if (m.role === 'user') {
         out.push({ role: 'user', content: m.content });
         continue;
@@ -640,6 +653,22 @@
             }),
           });
           if (!tc.pending) {
+            // COMPACTION: if this pair is in the compact set, emit a
+            // one-line summary instead of the full tool body. The
+            // summary prefers the NEXT round's reasoning (which
+            // typically describes what the model learned), falling
+            // back to this round's pre-call thought, then a generic.
+            if (compactSet.has(i)) {
+              const summary = findFollowOnReasoning(i) || m.reasoning?.trim() ||
+                'tool returned data; full output elided to free context';
+              const origLen = (tc.error ? tc.error : tc.result ?? '').length;
+              out.push({
+                role: 'tool',
+                content: `<tool_response>\n[compacted earlier ${tc.name} call: ${summary} (orig ${origLen} chars)]\n</tool_response>`,
+              });
+              continue;
+            }
+
             let body = tc.error ? `error: ${tc.error}` : tc.result ?? '';
             // Smart-mode caps tool results so a single verbose
             // search hit cannot dominate the local LLM's context.
@@ -679,6 +708,49 @@
     return out;
   }
 
+  /**
+   * Identify which transcript indices are completed-tool-pair
+   * assistant messages that should be compacted this round. Returns
+   * an empty Set when smart_mode + auto_compact + context >= 65%
+   * are not all true, OR when there are not enough pairs to compact
+   * (we always keep the most recent two verbatim).
+   */
+  function computeCompactSet(): Set<number> {
+    const KEEP_RECENT = 2;
+    const TRIGGER_FRAC = 0.65;
+    if (!chatSettings.smartMode || !chatSettings.autoCompact) return new Set();
+    if (!lastUsage.window || lastUsage.window <= 0) return new Set();
+    const usedFrac = lastUsage.total / lastUsage.window;
+    if (usedFrac < TRIGGER_FRAC) return new Set();
+
+    const pairIdxs: number[] = [];
+    transcript.forEach((m, i) => {
+      if (
+        m.role === 'assistant' &&
+        m.toolCalls &&
+        m.toolCalls.length > 0 &&
+        m.toolCalls.every((tc) => !tc.pending)
+      ) {
+        pairIdxs.push(i);
+      }
+    });
+    if (pairIdxs.length <= KEEP_RECENT) return new Set();
+    return new Set(pairIdxs.slice(0, pairIdxs.length - KEEP_RECENT));
+  }
+
+  /** Pull the next assistant-message reasoning that follows index
+   *  `from`. Useful for summarizing a tool exchange in the model's
+   *  own words from the round AFTER it saw the result. */
+  function findFollowOnReasoning(from: number): string | null {
+    for (let j = from + 1; j < transcript.length; j++) {
+      const t = transcript[j];
+      if (t.role === 'assistant' && t.reasoning && t.reasoning.trim()) {
+        return t.reasoning.trim();
+      }
+    }
+    return null;
+  }
+
   // ───────────────────────────────────────────────────────────────────
   // Anthropic agent loop. Mirrors runLoop() but uses Claude's native
   // tool-use protocol (no constrained-decoding schema needed — Anthropic
@@ -703,6 +775,13 @@
         properties: {},
       },
     }));
+
+    // v2.9.1: stall detection parity with runLoop. Same
+    // toolHashHistory + pendingNudge pattern. On Anthropic this
+    // fires less often (bigger context, native tool-use), but a
+    // loop-stuck Sonnet/Opus burns API dollars too, so the guard
+    // is worth having on both backends.
+    const toolHashHistory: string[] = [];
 
     while (round < chatSettings.maxRounds && !abortFlag) {
       round += 1;
@@ -797,7 +876,46 @@
       );
       scrollToBottom();
 
+      // Stall detection (smart-mode only). Hash this turn's tool_use
+      // set; if it matches the previous turn's exactly, the model is
+      // looping. Skip the real dispatches and inject synthetic
+      // tool_results that nudge the model toward a final answer.
+      // Context-full check fires when usage crosses 75% so the model
+      // gets one wrap-up round before the window blows.
+      let nudgeAllAs: string | null = null;
+      if (chatSettings.smartMode && result.toolUses.length > 0) {
+        const turnHash = result.toolUses
+          .map((tu) => hashToolCall(tu.name, tu.input))
+          .sort()
+          .join('||');
+        toolHashHistory.push(turnHash);
+        const decision = detectStallPattern({
+          toolHashHistory,
+          contextUsedTokens: lastUsage.total,
+          contextWindowTokens: lastUsage.window,
+        });
+        if (decision.kind === 'duplicate') nudgeAllAs = stallNudgeToolResult();
+        else if (decision.kind === 'context-full')
+          nudgeAllAs = contextFullNudgeToolResult(decision.usedFraction);
+      }
+
       for (const tu of result.toolUses) {
+        if (nudgeAllAs) {
+          // Skip real dispatch; surface the nudge as the result so
+          // the model sees it on the next round and finalizes.
+          const nudge = nudgeAllAs;
+          transcript = transcript.map((m2) =>
+            m2.id !== aId || !m2.toolCalls
+              ? m2
+              : {
+                  ...m2,
+                  toolCalls: m2.toolCalls.map((c) =>
+                    c.id === tu.id ? { ...c, pending: false, result: nudge } : c
+                  ),
+                }
+          );
+          continue;
+        }
         try {
           const out = await mcp.callTool(tu.name, applyScopeToToolArgs(tu.name, tu.input));
           transcript = transcript.map((m2) =>
@@ -855,7 +973,14 @@
    *  - Plain assistant final-answer turns → assistant message with text. */
   function buildAnthropicMessages(): AnthropicMessage[] {
     const out: AnthropicMessage[] = [];
-    for (const m of transcript) {
+    // Same compaction gate as buildMessagesForLLM. On Anthropic the
+    // window is huge (200k tokens) so this set is almost always
+    // empty in practice — but parity with the WebLLM loop matters
+    // and the cost-conscious heavy user on a very long session
+    // benefits from the same shrink.
+    const compactSet = computeCompactSet();
+    for (let i = 0; i < transcript.length; i++) {
+      const m = transcript[i];
       if (m.streaming) continue; // skip in-flight placeholder
       if (m.role === 'user') {
         out.push({ role: 'user', content: m.content });
@@ -880,16 +1005,25 @@
         if (m.toolCalls?.length) {
           // tool_result blocks live on a USER message in Anthropic's
           // protocol, immediately following the assistant's tool_use.
+          const isCompacted = compactSet.has(i);
           const results: AnthropicContentBlock[] = m.toolCalls
             .filter((tc) => !tc.pending)
             .map((tc) => {
               let body = tc.error ? `Error: ${tc.error}` : tc.result ?? '';
-              // Smart-mode caps results on the Anthropic side too.
-              // Anthropic's larger context makes this a smaller win,
-              // but cost-conscious users on long sessions still benefit
-              // (fewer input tokens per turn). Default budget is 8000
-              // for Anthropic so the cap is much looser than WebLLM.
-              if (chatSettings.smartMode && body && !tc.error) {
+              // Compaction: replace body with a one-line summary,
+              // lifted from the model's next-round reasoning when
+              // available.
+              if (isCompacted && !tc.error) {
+                const summary = findFollowOnReasoning(i) || m.reasoning?.trim() ||
+                  'tool returned data; full output elided to free context';
+                const origLen = body.length;
+                body = `[compacted earlier ${tc.name} call: ${summary} (orig ${origLen} chars)]`;
+              } else if (chatSettings.smartMode && body && !tc.error) {
+                // Smart-mode caps results on the Anthropic side too.
+                // Anthropic's larger context makes this a smaller win,
+                // but cost-conscious users on long sessions still benefit
+                // (fewer input tokens per turn). Default budget is 8000
+                // for Anthropic so the cap is much looser than WebLLM.
                 body = truncateToolResult(body, {
                   maxTokens: Math.max(chatSettings.toolResultMaxTokens * 10, 8000),
                   recoverHint:

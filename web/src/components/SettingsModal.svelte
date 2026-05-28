@@ -223,6 +223,62 @@
   });
 </script>
 
+<!-- Smart agent mode block. Hoisted out of <Modal> so it lives at
+     component-template scope rather than being interpreted as a
+     Modal slot/prop. Rendered inside both the cloud and local tab
+     bodies via {@render smartMode()} so WebLLM users (who land on
+     `local`) and Anthropic users (who land on `cloud`) both see
+     the toggle for their backend. -->
+{#snippet smartMode()}
+  <div class="section-label">SMART AGENT MODE</div>
+
+  <div class="row">
+    <div class="row-head">
+      <span class="name">smart_mode</span>
+      <span class="val">{chatSettings.smartMode ? 'on' : 'off'}</span>
+    </div>
+    <div class="seg-group">
+      <button class="seg" class:active={chatSettings.smartMode}
+        type="button" onclick={() => chatSettings.setSmartMode(true)}>on</button>
+      <button class="seg" class:active={!chatSettings.smartMode}
+        type="button" onclick={() => chatSettings.setSmartMode(false)}>off</button>
+    </div>
+    <p class="desc">
+      Optimizations for small local LLMs and long multi-turn chats. Truncates verbose tool results to fit the context, detects when the model is looping the same call and nudges it to finalize, and uses a compact system prompt on WebLLM. On Anthropic, the same optimizations save input tokens on long sessions. Default on; turn off to send everything verbatim.
+    </p>
+  </div>
+
+  <div class="row" class:row-inactive={!chatSettings.smartMode}>
+    <div class="row-head">
+      <span class="name">tool_result_max_tokens</span>
+      <span class="val">{chatSettings.toolResultMaxTokens.toLocaleString()}</span>
+    </div>
+    <input type="range" min="256" max="4000" step="64"
+      value={chatSettings.toolResultMaxTokens}
+      oninput={(e) => chatSettings.setToolResultMaxTokens(Number((e.target as HTMLInputElement).value))}
+    />
+    <p class="desc">
+      When Smart mode is on, each tool result is capped at this many tokens before being fed back to the model. Truncated output ends with a marker telling the model how to fetch more (e.g., <code>get_chunk_context</code> for a search hit). Anthropic gets a 10x looser cap because its context is bigger.
+    </p>
+  </div>
+
+  <div class="row" class:row-inactive={!chatSettings.smartMode}>
+    <div class="row-head">
+      <span class="name">auto_compact</span>
+      <span class="val">{chatSettings.autoCompact ? 'on' : 'off'}</span>
+    </div>
+    <div class="seg-group">
+      <button class="seg" class:active={chatSettings.autoCompact}
+        type="button" onclick={() => chatSettings.setAutoCompact(true)}>on</button>
+      <button class="seg" class:active={!chatSettings.autoCompact}
+        type="button" onclick={() => chatSettings.setAutoCompact(false)}>off</button>
+    </div>
+    <p class="desc">
+      When context use crosses 65%, collapse the oldest tool exchanges into one-line summaries lifted from the model's own thought field. Frees room for the answer without losing the lesson. The most recent two tool calls and the system prompt are always preserved verbatim.
+    </p>
+  </div>
+{/snippet}
+
 <Modal {open} title="CHAT SETTINGS" {onClose}>
   <div class="tabs" role="tablist">
     <button class="tab" class:active={section === 'cloud'} role="tab" type="button"
@@ -355,43 +411,7 @@
         </p>
       </div>
 
-      <!-- ============ Smart mode (v2.9.0) ============ -->
-      <div class="section-label">SMART AGENT MODE</div>
-
-      <div class="row">
-        <div class="row-head">
-          <span class="name">smart_mode</span>
-          <span class="val">{chatSettings.smartMode ? 'on' : 'off'}</span>
-        </div>
-        <div class="seg-group">
-          <button class="seg" class:active={chatSettings.smartMode}
-            type="button" onclick={() => chatSettings.setSmartMode(true)}>on</button>
-          <button class="seg" class:active={!chatSettings.smartMode}
-            type="button" onclick={() => chatSettings.setSmartMode(false)}>off</button>
-        </div>
-        <p class="desc">
-          Optimizations for small local LLMs and long multi-turn chats. Truncates verbose tool results to fit the context, detects when the model is looping the same call and nudges it to finalize, and uses a compact system prompt on WebLLM. On Anthropic, the same optimizations save input tokens on long sessions. Default on; turn off to send everything verbatim.
-        </p>
-      </div>
-
-      <div class="row">
-        <div class="row-head">
-          <span class="name">tool_result_max_tokens</span>
-          <span class="val">{chatSettings.toolResultMaxTokens.toLocaleString()}</span>
-        </div>
-        <input type="range" min="256" max="4000" step="64"
-          value={chatSettings.toolResultMaxTokens}
-          oninput={(e) => chatSettings.setToolResultMaxTokens(Number((e.target as HTMLInputElement).value))}
-        />
-        <p class="desc">
-          When Smart mode is on, each tool result is capped at this many tokens before being fed back to the model. Truncated output ends with a marker telling the model how to fetch more (e.g., <code>get_chunk_context</code> for a search hit). Anthropic gets a 10x looser cap because its context is bigger.
-        </p>
-      </div>
-
-      <!-- v2.9.1 will add auto-compaction (collapse oldest tool exchanges
-           to one-line summaries when context >65%). For v2.9.0 the
-           toggle is stored but inert; truncation + stall detection
-           already cover the common context-pressure cases. -->
+      {@render smartMode()}
 
       <label class="check">
         <input type="checkbox"
@@ -462,6 +482,8 @@
         />
         <p class="desc">Hard cap on tool-call rounds per user turn. Shared with Anthropic mode.</p>
       </div>
+
+      {@render smartMode()}
 
       <!-- ============ Agent loop ============ -->
       <div class="section-label">AGENT</div>
