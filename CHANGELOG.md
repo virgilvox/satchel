@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.8.3 (2026-05-28)
+
+### Claude Haiku no longer triggers 400s from extended-thinking knobs
+
+Haiku 4.5 has no extended-thinking surface, so sending `thinking` or
+`output_config.effort` in the request body returns
+`invalid_request_error`. The chat UI was sending them on every model.
+
+Fixed at two layers:
+
+- **Client side:** `ChatModel` grows a `supportsExtendedThinking`
+  flag; Opus 4.7 and Sonnet 4.6 are `true`, Haiku 4.5 is `false`.
+  The Anthropic runner in `Chat.svelte` reads the flag and omits
+  `thinking` and `effort` from the API call when the active model
+  does not support them. The Settings modal dims those two controls
+  and shows an amber note when Haiku is selected: "Claude Haiku 4.5
+  does not support extended thinking. The effort and thinking knobs
+  are stored but omitted from the API request for this model."
+- **Server side defense in depth:** `strip_unsupported_params` in
+  `src/anthropic/mod.rs` now strips `thinking` and `output_config`
+  for any model whose id starts with `claude-haiku`, mirroring the
+  existing strip of `temperature`/`top_p`/`top_k` for Opus 4.7. Two
+  new unit tests pin the behavior (and confirm Opus + Sonnet still
+  pass those fields through).
+
+261 tests passing.
+
 ## v2.8.2 (2026-05-28)
 
 ### Server now binds 0.0.0.0 by default so satchel.local reaches the LAN

@@ -635,6 +635,14 @@
       scrollToBottom();
 
       const messages = buildAnthropicMessages();
+      // Extended-thinking surface (thinking + output_config.effort) is
+      // only valid on models that opt in. Haiku 4.5 returns 400 from
+      // the API if those fields are present. Gate on the model's
+      // capability flag so we omit them cleanly. Server-side
+      // strip_unsupported_params is the defense-in-depth backstop for
+      // anything that still leaks through (e.g. third-party clients
+      // hitting the proxy directly).
+      const supportsThinking = m.supportsExtendedThinking ?? false;
       let result;
       try {
         result = await streamAnthropicTurn(
@@ -645,8 +653,8 @@
             system: systemPrompt,
             max_tokens: chatSettings.anthropicMaxTokens,
             cache: chatSettings.anthropicCaching,
-            thinking: chatSettings.anthropicThinking,
-            effort: chatSettings.anthropicEffort,
+            thinking: supportsThinking ? chatSettings.anthropicThinking : undefined,
+            effort: supportsThinking ? chatSettings.anthropicEffort : undefined,
           },
           (delta) => {
             transcript = transcript.map((m2) =>

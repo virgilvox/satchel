@@ -77,22 +77,37 @@ impl AnthropicConfig {
     }
 }
 
-/// Strip sampling parameters that the requested model rejects.
+/// Strip request fields that the requested model rejects.
 ///
-/// Opus 4.7 returns 400 if `temperature`, `top_p`, or `top_k` are sent.
-/// Defense in depth: even though the chat UI no longer sends them in
-/// Anthropic mode, third-party clients (curl, scripts) hitting this
-/// proxy might. Drop them silently rather than letting Anthropic reject
-/// the whole request.
+/// Two model-specific quirks the chat UI already avoids; we mirror
+/// them server-side as defense in depth so third-party clients (curl,
+/// scripts, alternative chat frontends) hitting this proxy do not
+/// trip a 400 from Anthropic.
+///
+/// 1. Opus 4.7 returns 400 if `temperature`, `top_p`, or `top_k` are
+///    present (sampling controls were dropped on the 4.7 line).
+/// 2. Haiku 4.5 does not expose the extended-thinking surface, so
+///    `thinking` and `output_config.effort` return 400 (Haiku has no
+///    extended-thinking budget to spend). The Chat UI gates these
+///    behind a `supportsExtendedThinking` flag on each ChatModel and
+///    omits them client-side; this strip is for everyone else.
 fn strip_unsupported_params(body: &mut serde_json::Map<String, serde_json::Value>) {
+    // Take an owned copy so the borrow released and we can mutate
+    // `body` freely below. The string is short so the allocation is
+    // negligible; the alternative (split-borrow tricks) is uglier.
     let model = body
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
     if model.starts_with("claude-opus-4-7") {
         body.remove("temperature");
         body.remove("top_p");
         body.remove("top_k");
+    }
+    if model.starts_with("claude-haiku") {
+        body.remove("thinking");
+        body.remove("output_config");
     }
 }
 
@@ -186,5 +201,40 @@ mod tests {
             serde_json::from_str(r#"{"temperature":0.7,"max_tokens":1024}"#).unwrap();
         strip_unsupported_params(&mut body);
         assert!(body.contains_key("temperature"));
+    }
+
+    #[test]
+    fn strips_thinking_and_output_config_on_haiku() {
+        // Haiku 4.5 returns 400 if `thinking` or `output_config` are
+        // present (no extended-thinking surface). Defense in depth
+        // mirrors the Chat UI's capability gate so third-party clients
+        // hitting the proxy do not blow up on a typo.
+        let mut body: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"model":"claude-haiku-4-5","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"max_tokens":2048}"#,
+        )
+        .unwrap();
+        strip_unsupported_params(&mut body);
+        assert!(!body.contains_key("thinking"));
+        assert!(!body.contains_key("output_config"));
+        assert_eq!(body.get("max_tokens").unwrap().as_i64().unwrap(), 2048);
+    }
+
+    #[test]
+    fn keeps_thinking_on_opus_and_sonnet() {
+        // Sanity check the strip is model-specific and not over-broad.
+        for model in ["claude-opus-4-7", "claude-sonnet-4-6"] {
+            let mut body: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+                &format!(
+                    r#"{{"model":"{model}","thinking":{{"type":"adaptive"}},"output_config":{{"effort":"high"}}}}"#
+                ),
+            )
+            .unwrap();
+            strip_unsupported_params(&mut body);
+            assert!(body.contains_key("thinking"), "{model} dropped thinking");
+            assert!(
+                body.contains_key("output_config"),
+                "{model} dropped output_config"
+            );
+        }
     }
 }

@@ -35,6 +35,12 @@ export interface ChatModel {
   /** Public per-token pricing for cost-meter display. Anthropic-only;
    *  WebLLM is always free at runtime. */
   pricing?: ChatModelPricing;
+  /** Anthropic models only: true when the model supports the extended
+   *  thinking API surface (`thinking: { type: "adaptive" }` and
+   *  `output_config.effort`). False on Haiku 4.5 and any other model
+   *  that does not have extended thinking; those params would return
+   *  400 from the API and must be omitted from the request body. */
+  supportsExtendedThinking?: boolean;
 }
 
 const ANTHROPIC_MODELS: ChatModel[] = [
@@ -46,6 +52,7 @@ const ANTHROPIC_MODELS: ChatModel[] = [
     backend: 'anthropic',
     notes: 'Most capable. Anthropic API key required (Settings → Anthropic API).',
     pricing: { inputPerMillion: 5, outputPerMillion: 25 },
+    supportsExtendedThinking: true,
   },
   {
     id: 'claude-sonnet-4-6',
@@ -55,6 +62,7 @@ const ANTHROPIC_MODELS: ChatModel[] = [
     backend: 'anthropic',
     notes: 'Balanced. Strong tool use; faster than Opus.',
     pricing: { inputPerMillion: 3, outputPerMillion: 15 },
+    supportsExtendedThinking: true,
   },
   {
     id: 'claude-haiku-4-5',
@@ -62,8 +70,9 @@ const ANTHROPIC_MODELS: ChatModel[] = [
     group: 'Anthropic API',
     size: 'API',
     backend: 'anthropic',
-    notes: 'Fastest, cheapest. Good for quick lookups.',
+    notes: 'Fastest, cheapest. No extended thinking; effort/thinking knobs do not apply.',
     pricing: { inputPerMillion: 1, outputPerMillion: 5 },
+    supportsExtendedThinking: false,
   },
 ];
 

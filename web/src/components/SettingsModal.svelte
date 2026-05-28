@@ -4,11 +4,13 @@
   import Dot from './Dot.svelte';
   import {
     chatSettings,
+    settings,
     type ContextSize,
     type SlidingSize,
     type AnthropicEffort,
     type AnthropicThinkingMode,
   } from '../lib/stores.svelte';
+  import { CHAT_MODELS, findChatModel } from '../lib/chatModels';
   import type { McpTool } from '../lib/types';
   import {
     getAnthropicConfigured,
@@ -66,6 +68,18 @@
 
   const ctxOptions: ContextSize[] = ['auto', 4096, 8192, 16384, 32768];
   const slidingOptions: SlidingSize[] = ['off', 1024, 2048, 4096, 8192];
+
+  // Active Anthropic model + capability flags. Anthropic exposes
+  // extended thinking (`thinking: {type: "adaptive"}`) and the
+  // companion `output_config.effort` field only on Opus and Sonnet
+  // tiers. Haiku 4.5 returns 400 if either is in the request body,
+  // so the runner already omits them; here we just dim the matching
+  // controls and add a one-line note so the user understands why
+  // their adjustments are inert when Haiku is the active model.
+  let currentChatModel = $derived(findChatModel(settings.chatModel) ?? CHAT_MODELS[0]);
+  let thinkingSupported = $derived(
+    !!(currentChatModel && currentChatModel.supportsExtendedThinking),
+  );
 
   // Active tab. Recomputed every time the modal opens so deep-links and
   // backend defaults take effect on each open.
@@ -273,7 +287,15 @@
       <!-- ============ Generation (API mode) ============ -->
       <div class="section-label">GENERATION</div>
 
-      <div class="row">
+      {#if !thinkingSupported}
+        <p class="model-note">
+          <strong>{currentChatModel?.label ?? 'This model'}</strong> does not support extended thinking.
+          The <code>effort</code> and <code>thinking</code> knobs below are stored but omitted from the API request for this model.
+          Pick Claude Opus 4.7 or Sonnet 4.6 if you want them to take effect.
+        </p>
+      {/if}
+
+      <div class="row" class:row-inactive={!thinkingSupported}>
         <div class="row-head">
           <span class="name">effort</span>
           <span class="val">{chatSettings.anthropicEffort}</span>
@@ -289,7 +311,7 @@
         </p>
       </div>
 
-      <div class="row">
+      <div class="row" class:row-inactive={!thinkingSupported}>
         <div class="row-head">
           <span class="name">thinking</span>
           <span class="val">{chatSettings.anthropicThinking}</span>
@@ -712,7 +734,33 @@
     word-break: break-all;
   }
   .row.builtin-mcp { border-color: var(--teal); }
+  .row.row-inactive {
+    opacity: 0.55;
+  }
+  .row.row-inactive .seg {
+    cursor: not-allowed;
+  }
   .anthropic-status .name { font-weight: 500; flex: 1; }
+
+  .model-note {
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    background: var(--amber-soft);
+    border: 1px solid var(--amber-line);
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .model-note code {
+    color: var(--amber);
+    background: transparent;
+    padding: 0;
+    font-weight: 700;
+  }
+  .model-note strong {
+    color: var(--amber);
+    font-weight: 700;
+  }
 
   .form {
     display: flex;
