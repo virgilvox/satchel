@@ -1106,22 +1106,52 @@ impl Database {
 
     /// Add documents (by id) to a collection. Idempotent — duplicates are
     /// collapsed by the composite primary key.
+    /// Add documents to a collection. Returns the number of rows
+    /// actually inserted (excludes rows that were already a member; the
+    /// underlying INSERT OR IGNORE collapses those silently). Unknown
+    /// document_ids will trigger a FOREIGN KEY constraint failure on
+    /// SQLite; callers that may pass unknown ids should pre-filter
+    /// with [`Self::filter_existing_document_ids`].
     pub fn collection_add_documents(&self, id: i64, document_ids: &[String]) -> Result<usize> {
         if document_ids.is_empty() {
             return Ok(0);
         }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let mut inserted = 0usize;
         {
             let mut stmt = tx.prepare(
                 "INSERT OR IGNORE INTO document_collections (document_id, collection_id) VALUES (?1, ?2)",
             )?;
             for doc_id in document_ids {
-                stmt.execute(params![doc_id, id])?;
+                // execute() returns rows-changed for the last statement.
+                // INSERT OR IGNORE returns 1 when a row was inserted and
+                // 0 when the row was suppressed by the conflict resolver.
+                inserted += stmt.execute(params![doc_id, id])?;
             }
         }
         tx.commit()?;
-        Ok(document_ids.len())
+        Ok(inserted)
+    }
+
+    /// Return the subset of `document_ids` that exist in the
+    /// `documents` table, preserving the input order. Used by callers
+    /// that need to silently drop unknown ids before passing them to
+    /// [`Self::collection_add_documents`] (which is FK-bound).
+    pub fn filter_existing_document_ids(&self, document_ids: &[String]) -> Result<Vec<String>> {
+        if document_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT 1 FROM documents WHERE id = ?1")?;
+        let mut out = Vec::with_capacity(document_ids.len());
+        for id in document_ids {
+            let exists: Option<i64> = stmt.query_row(params![id], |r| r.get(0)).optional()?;
+            if exists.is_some() {
+                out.push(id.clone());
+            }
+        }
+        Ok(out)
     }
 
     pub fn collection_remove_documents(&self, id: i64, document_ids: &[String]) -> Result<usize> {

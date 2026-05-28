@@ -440,13 +440,17 @@ fn collapse_whitespace(text: &str) -> String {
     collapsed
 }
 
-struct Chunk {
-    text: String,
-    char_start: usize,
-    char_end: usize,
+/// One body chunk plus the character window it came from in the
+/// source text. Exposed at the crate level so the MCP `add_to_vault`
+/// handler can reuse the same chunker the file-ingest path uses
+/// without going through file I/O.
+pub(crate) struct Chunk {
+    pub(crate) text: String,
+    pub(crate) char_start: usize,
+    pub(crate) char_end: usize,
 }
 
-fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<Chunk> {
+pub(crate) fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let paragraphs: Vec<&str> = text.split("\n\n").collect();
 

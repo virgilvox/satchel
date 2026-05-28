@@ -1,5 +1,80 @@
 # Changelog
 
+## v2.8.0 (2026-05-28)
+
+### MCP write surface: add_to_vault, create_collection, assign_to_collection
+
+The MCP tool list grows from 7 read-only tools to 10. Agents can now
+save text into the vault, pre-create collections, and organize
+existing documents. The new tools:
+
+- `add_to_vault` accepts a `content` string (plain text, markdown,
+  JSON, HTML, or code; capped at 5 MB), optional `title`, `source`,
+  `file_type`, `tags`, `collection_name`, and `dry_run`. Goes through
+  the same chunk + embed + index pipeline as file ingest, so
+  MCP-added notes behave identically in `search_knowledge`,
+  `get_chunk_context`, `list_sources`, and the Documents UI. The
+  source defaults to `mcp://note/<short-uuid>`; bare names get an
+  `mcp://` prefix auto-applied so MCP-added documents stand out from
+  real filesystem paths in `list_sources`.
+- `create_collection` is the explicit "set this up first" companion
+  for a batch of adds. Idempotent on case-insensitive name match.
+- `assign_to_collection` adds existing documents (by `document_id`)
+  to a named collection. Cap of 200 ids per call. Unknown ids are
+  silently dropped and reported in the response so an agent can pass
+  a best-effort list without having to verify each id first.
+
+The default Anthropic system prompt was updated to teach the model
+when to invoke these write tools (only on explicit user intent like
+"save this") and when to use `dry_run: true`.
+
+### Hardening
+
+- Embedder availability is checked BEFORE collection resolution so
+  a no-model dev launch never leaves an orphan empty collection.
+  Mirrors the same fix on CLI and REST `/api/ingest`.
+- 5 MB cap on `add_to_vault` content; bigger payloads should land on
+  disk and use `satchel ingest <path>`.
+- 32-tag cap per `add_to_vault` call; 200-id cap per
+  `assign_to_collection` call.
+- File type restricted to text formats via inputSchema enum
+  (md, markdown, txt, json, html, note, code); pdf/docx/etc. cannot
+  sneak in this way.
+- SHA-256 dedup on `(source_path, content)` means a re-issued
+  `add_to_vault` returns the existing `document_id` instead of
+  duplicating the row. The dedup-skip path still honors `tags` and
+  `collection_name` so re-issuing into a new collection actually
+  populates the new collection (same semantic as file ingest's
+  dedup-skip path).
+- `dry_run: true` validates and reports the would-be result without
+  any DB writes.
+- Every successful write emits a `tracing::info!` line with
+  `doc_id`, `source`, and byte size so users can grep server stderr
+  to audit what their agent has been saving.
+
+### Database
+
+- `Database::collection_add_documents` now returns the number of rows
+  *actually inserted* (excludes already-members), not the size of
+  the input. The web UI's "added" count in the bulk-move modal now
+  reports honest numbers.
+- New `Database::filter_existing_document_ids` helper. Used by
+  `assign_to_collection` to pre-filter unknown ids so the FK-bound
+  `collection_add_documents` does not abort the whole batch on the
+  first bad id.
+
+### Tests
+
+258 passing, up from 239. New coverage:
+
+- `add_to_vault`: basic, dedup, dedup-still-joins-new-collection,
+  collection auto-create, tag persistence, dry_run, empty rejection,
+  oversized rejection, bad file_type, too-many-tags, source
+  canonicalization, end-to-end search-then-assign round-trip.
+- `create_collection`: idempotent (case-insensitive), empty rejection.
+- `assign_to_collection`: known ids, silent drop on unknown ids,
+  empty list rejection, too-many-ids rejection, idempotent on repeat.
+
 ## v2.7.1 (2026-05-27)
 
 ### npm packaging fix for macOS

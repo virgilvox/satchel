@@ -166,6 +166,81 @@ pub fn tool_definitions() -> Value {
                     },
                     "required": ["chunk_id"]
                 }
+            },
+            {
+                "name": "add_to_vault",
+                "description": "Save a text snippet, markdown document, or any other textual content into the vault so it becomes searchable. Use this when the user asks to remember a quote, paste a document, capture a synthesis of the current conversation, or commit a note for later retrieval. Content is chunked, embedded, and indexed alongside everything else. Returns a stable document_id you can pass to `assign_to_collection` or `get_document` later. Identical content is deduplicated by SHA-256, so calling twice is a safe no-op (the second call still honors collection_name and tags so re-ingesting into a new collection actually works). Do not call this without an explicit user intent to save; treat each invocation as a privileged write that the user has authorized for this turn.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["content"],
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The text to save. Plain text, markdown, JSON, HTML, or code. Required; must be non-empty after trimming; capped at 5 MB."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Short human-readable label shown in list_sources and search results. If omitted, the first line of content (truncated to 80 chars) is used."
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Logical source identifier. Use a stable meaningful name like 'meeting-2026-05-28' or 'design-notes/v3' so future searches can scope to it via filter_source. If omitted, a fresh mcp://note/<uuid> is generated. Names without a scheme are auto-prefixed with mcp:// so the source is visually distinct from real filesystem paths in list_sources."
+                        },
+                        "file_type": {
+                            "type": "string",
+                            "enum": ["md", "markdown", "txt", "json", "html", "note", "code"],
+                            "default": "md",
+                            "description": "Format hint, exposed via filter_file_type on later searches."
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Free-form tags applied to the document. Short slug-like values read cleanly (e.g., 'design', 'meeting-notes'). Cap of 32 tags per call."
+                        },
+                        "collection_name": {
+                            "type": "string",
+                            "description": "Add this document to the named collection. Auto-creates the collection if it does not yet exist."
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Validate inputs and report what would happen without writing. Useful before committing a large paste."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "create_collection",
+                "description": "Create a named collection (a subset of the vault you can filter searches to). Returns the collection's id and name. Idempotent: re-creating an existing name (case-insensitive) returns the existing id rather than failing. Useful when you plan to add a batch of related items and want a stable container ready first.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Human-readable collection label (e.g., 'Work', 'Research', '2026-Q2-planning'). 1 to 64 characters after trimming."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "assign_to_collection",
+                "description": "Add existing documents (by document_id) to a named collection. Pair with search_knowledge or list_sources to organize material the user wants to group together. The collection is auto-created if missing. Idempotent: re-assigning an already-member document is a no-op. Cap of 200 document_ids per call.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["collection_name", "document_ids"],
+                    "properties": {
+                        "collection_name": {
+                            "type": "string",
+                            "description": "Target collection (auto-created if it does not exist)."
+                        },
+                        "document_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "List of document_ids returned by search_knowledge or list_sources. Unknown ids are silently dropped; the response reports the actual count added."
+                        }
+                    }
+                }
             }
         ]
     })
@@ -204,6 +279,9 @@ pub async fn handle_request(request: &JsonRpcRequest, db: &Database, embedder: &
                 "vault_stats" => handle_vault_stats(db),
                 "list_collections" => handle_list_collections(db),
                 "get_chunk_context" => handle_get_chunk_context(args, db),
+                "add_to_vault" => handle_add_to_vault(args, db, embedder),
+                "create_collection" => handle_create_collection(args, db),
+                "assign_to_collection" => handle_assign_to_collection(args, db),
                 _ => tool_error(&format!("Unknown tool: {tool_name}")),
             }
         }
@@ -442,6 +520,474 @@ fn handle_list_collections(db: &Database) -> Value {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Write tools (v2.8.0): add_to_vault, create_collection, assign_to_collection.
+//
+// All writes go through the same chunk + embed + insert pipeline as
+// file-based ingest, so MCP-added notes behave identically in search,
+// list_sources, get_chunk_context, and collections. Hardened against
+// the obvious failure modes:
+//
+//   - embedder-gone: refuse up-front (same as REST /api/ingest and CLI).
+//   - empty content: 400-equivalent error before any DB write.
+//   - oversized content: 5 MB cap. Bigger payloads belong on disk +
+//     `satchel ingest <path>`.
+//   - dedup: SHA-256 content hash; a re-add returns the existing
+//     document_id and still honors collection_name and tags so
+//     re-adding into a different collection actually populates the
+//     new collection (same semantic as ingest_file's dedup-skip path).
+//   - dry_run: validate only, never write.
+//   - source: defaults to `mcp://note/<uuid>`; bare names get an
+//     `mcp://` prefix so MCP-added sources stand out from real
+//     filesystem paths in list_sources.
+//
+// Audit: every successful write emits a tracing::info! with doc_id,
+// size, and source so the user can grep the server's stderr to see
+// what their agent has been saving.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Hard cap on add_to_vault content size. 5 MB is enough for any
+/// reasonable paste (a whole Linux source file, a chapter of a book,
+/// a full Slack daily export's text fields) without giving an
+/// agent a giant footgun. Bigger payloads should land on disk first
+/// and be ingested with `satchel ingest <path>`.
+const ADD_TO_VAULT_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+/// Cap on tag count per add_to_vault call. Beyond this, the agent is
+/// almost certainly hallucinating a taxonomy; reject so the user does
+/// not end up with thousands of one-document tags.
+const ADD_TO_VAULT_MAX_TAGS: usize = 32;
+
+/// Cap on document_ids per assign_to_collection call. Keeps a single
+/// bulk-organize call within sane bounds.
+const ASSIGN_TO_COLLECTION_MAX_IDS: usize = 200;
+
+/// Supported file_type values for add_to_vault. Keep in sync with the
+/// tool's inputSchema `enum`. Reject anything else so unsupported file
+/// types (pdf, docx, csv as raw blob) cannot sneak in this way; users
+/// who want those should ingest via the file path.
+fn is_supported_mcp_file_type(t: &str) -> bool {
+    matches!(
+        t,
+        "md" | "markdown" | "txt" | "json" | "html" | "note" | "code"
+    )
+}
+
+/// Resolve a user-supplied `source` to the canonical form we store. A
+/// bare relative name like `journal/2026` gets an `mcp://` prefix so
+/// it is visually distinct from on-disk paths in list_sources. A
+/// fully-qualified name with a scheme (`mcp://...`, `file:///...`,
+/// `note://...`) is taken as-is. Empty/missing input yields a fresh
+/// `mcp://note/<short-uuid>` so every doc has a stable identifier.
+fn canonicalize_mcp_source(raw: Option<&str>) -> String {
+    let trimmed = raw.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let short = &id[..8];
+        return format!("mcp://note/{short}");
+    }
+    if trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    format!("mcp://{trimmed}")
+}
+
+/// Derive a title when the caller did not supply one. First non-empty
+/// line of content, trimmed to 80 chars with an ellipsis on truncation.
+/// Falls back to "(untitled)" for pathological all-whitespace inputs
+/// (which add_to_vault would reject earlier anyway; defensive only).
+fn derive_title_from_content(content: &str) -> String {
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("(untitled)");
+    if first_line.chars().count() <= 80 {
+        first_line.to_string()
+    } else {
+        let mut out: String = first_line.chars().take(77).collect();
+        out.push_str("...");
+        out
+    }
+}
+
+fn handle_add_to_vault(args: &Value, db: &Database, embedder: &Embedder) -> Value {
+    // --- Validate up-front, before touching the DB or the embedder. ---
+    let content = match args.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return tool_error("`content` is required and must be a string"),
+    };
+    if content.trim().is_empty() {
+        return tool_error("`content` must not be empty");
+    }
+    if content.len() > ADD_TO_VAULT_MAX_BYTES {
+        return tool_error(&format!(
+            "`content` is {} bytes; max is {} bytes ({} MB). For larger payloads, save the file and use `satchel ingest <path>`.",
+            content.len(),
+            ADD_TO_VAULT_MAX_BYTES,
+            ADD_TO_VAULT_MAX_BYTES / (1024 * 1024),
+        ));
+    }
+
+    let file_type = args
+        .get("file_type")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("md");
+    if !is_supported_mcp_file_type(file_type) {
+        return tool_error(&format!(
+            "`file_type` {file_type:?} is not supported via MCP. Use one of: md, markdown, txt, json, html, note, code."
+        ));
+    }
+
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if tags.len() > ADD_TO_VAULT_MAX_TAGS {
+        return tool_error(&format!(
+            "{} tags supplied; max is {}.",
+            tags.len(),
+            ADD_TO_VAULT_MAX_TAGS
+        ));
+    }
+
+    let source_path = canonicalize_mcp_source(args.get("source").and_then(|v| v.as_str()));
+    let title_arg = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let title = title_arg.unwrap_or_else(|| derive_title_from_content(content));
+
+    let collection_name = args
+        .get("collection_name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Chunk preview (same chunker as file ingest, so chunk counts match
+    // what the user would see ingesting an equivalent file).
+    let chunks_preview = crate::ingest::chunk_text(content, 512, 64);
+
+    if dry_run {
+        let coll_line = match &collection_name {
+            Some(n) => format!("  collection:    {n} (would be created if missing)\n"),
+            None => String::new(),
+        };
+        let tag_line = if tags.is_empty() {
+            String::new()
+        } else {
+            format!("  tags:          {}\n", tags.join(", "))
+        };
+        return tool_text(&format!(
+            "Would save (dry_run=true; no writes performed):\n  source:        {source}\n  title:         {title}\n  file_type:     {file_type}\n  size:          {bytes} bytes\n  chunks:        {chunks}\n{coll}{tags}",
+            source = source_path,
+            bytes = content.len(),
+            chunks = chunks_preview.len(),
+            coll = coll_line,
+            tags = tag_line,
+        ));
+    }
+
+    // --- Embedder gate. Same ordering as REST /api/ingest and CLI: ---
+    // refuse BEFORE collection_name auto-create so a no-model run does
+    // not leave an orphan empty collection.
+    if !embedder.is_available() {
+        return tool_error(
+            "embedding model unavailable; cannot save. Run ./scripts/download-model.sh or rebuild satchel with --features embed-model.",
+        );
+    }
+
+    // Hash + dedup check. We hash on (source_path, content) so two
+    // distinct sources with identical bodies are NOT collapsed — that
+    // matches user intent ("save this twice under different labels")
+    // while a true repeat-add at the same source is correctly dedup'd.
+    use sha2::{Digest, Sha256};
+    let sha256 = {
+        let mut h = Sha256::new();
+        h.update(source_path.as_bytes());
+        h.update(b"\0");
+        h.update(content.as_bytes());
+        format!("{:x}", h.finalize())
+    };
+
+    let existing = match db.document_id_by_hash(&sha256) {
+        Ok(opt) => opt,
+        Err(e) => return tool_error(&format!("hash lookup error: {e}")),
+    };
+
+    // Resolve (or create) the collection AFTER the embedder gate but
+    // BEFORE we commit the doc, so a single create failure does not
+    // strand a half-inserted document.
+    let collection_id = match collection_name.as_deref() {
+        Some(name) => match resolve_or_create_collection(db, name) {
+            Ok(id) => Some(id),
+            Err(e) => return tool_error(&format!("collection: {e}")),
+        },
+        None => None,
+    };
+
+    if let Some(existing_id) = existing {
+        // Dedup hit. Still apply the requested collection assignment +
+        // tags so the user can re-issue add_to_vault to attach a known
+        // doc to a new collection or add tags to it.
+        if let Some(cid) = collection_id {
+            if let Err(e) = db.collection_add_documents(cid, std::slice::from_ref(&existing_id)) {
+                return tool_error(&format!("collection_add_documents: {e}"));
+            }
+        }
+        for tag in &tags {
+            if let Err(e) = db.add_tag(&existing_id, tag) {
+                return tool_error(&format!("add_tag: {e}"));
+            }
+        }
+        tracing::info!(
+            doc_id = %existing_id,
+            source = %source_path,
+            bytes = content.len(),
+            dedup = true,
+            "mcp add_to_vault: dedup hit"
+        );
+        return tool_text(&format_add_result(
+            &existing_id,
+            &source_path,
+            chunks_preview.len(),
+            collection_name.as_deref(),
+            &tags,
+            true,
+        ));
+    }
+
+    // Fresh insert.
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = db.insert_document(
+        &doc_id,
+        &source_path,
+        file_type,
+        Some(&title),
+        content,
+        &sha256,
+    ) {
+        return tool_error(&format!("insert_document: {e}"));
+    }
+
+    if let Some(cid) = collection_id {
+        if let Err(e) = db.collection_add_documents(cid, std::slice::from_ref(&doc_id)) {
+            return tool_error(&format!("collection_add_documents: {e}"));
+        }
+    }
+    for tag in &tags {
+        if let Err(e) = db.add_tag(&doc_id, tag) {
+            return tool_error(&format!("add_tag: {e}"));
+        }
+    }
+
+    // Chunk + embed + persist. Each chunk failure rolls back nothing
+    // (we are not in a transaction; chunks are independent rows), but
+    // we surface the first failure and stop so the caller knows the
+    // doc is partial. This matches existing ingest_file behavior.
+    let mut chunks_written = 0usize;
+    for (i, chunk) in chunks_preview.iter().enumerate() {
+        let embedding = match embedder.embed_with_info(&chunk.text) {
+            Ok(e) => e,
+            Err(e) => {
+                return tool_error(&format!(
+                    "embed chunk {i}: {e} (document {doc_id} created with {chunks_written}/{total} chunks; remaining chunks are not indexed)",
+                    total = chunks_preview.len()
+                ));
+            }
+        };
+        if let Err(e) = db.insert_chunk(
+            &format!("{doc_id}:{i}"),
+            &doc_id,
+            i,
+            &chunk.text,
+            embedding.token_count,
+            chunk.char_start,
+            chunk.char_end,
+            &embedding.vector,
+        ) {
+            return tool_error(&format!("insert_chunk {i}: {e}"));
+        }
+        chunks_written += 1;
+    }
+
+    tracing::info!(
+        doc_id = %doc_id,
+        source = %source_path,
+        bytes = content.len(),
+        chunks = chunks_written,
+        "mcp add_to_vault: wrote document"
+    );
+
+    tool_text(&format_add_result(
+        &doc_id,
+        &source_path,
+        chunks_written,
+        collection_name.as_deref(),
+        &tags,
+        false,
+    ))
+}
+
+fn format_add_result(
+    doc_id: &str,
+    source: &str,
+    chunks: usize,
+    collection: Option<&str>,
+    tags: &[String],
+    dedup: bool,
+) -> String {
+    let mut out = if dedup {
+        String::from("Already in the vault (deduplicated by content hash).\n")
+    } else {
+        String::from("Saved.\n")
+    };
+    out.push_str(&format!("  document_id:   {doc_id}\n"));
+    out.push_str(&format!("  source:        {source}\n"));
+    out.push_str(&format!("  chunks:        {chunks}\n"));
+    if let Some(c) = collection {
+        let label = if dedup {
+            "collection (added)"
+        } else {
+            "collection"
+        };
+        out.push_str(&format!("  {label}:    {c}\n"));
+    }
+    if !tags.is_empty() {
+        let label = if dedup { "tags (added)" } else { "tags" };
+        out.push_str(&format!("  {label}:           {}\n", tags.join(", ")));
+    }
+    out
+}
+
+/// Idempotent create-or-resolve helper used by add_to_vault,
+/// create_collection, and assign_to_collection. Mirrors the
+/// `resolve_or_create_collection` helpers on the CLI and the HTTP
+/// server: case-insensitive name match against existing collections,
+/// fall back to create when no match.
+fn resolve_or_create_collection(db: &Database, name: &str) -> anyhow::Result<i64> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("collection name must not be empty");
+    }
+    for c in db.list_collections()? {
+        if c.name.eq_ignore_ascii_case(trimmed) {
+            return Ok(c.id);
+        }
+    }
+    db.create_collection(trimmed)
+}
+
+fn handle_create_collection(args: &Value, db: &Database) -> Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(s) => s.trim(),
+        None => return tool_error("`name` is required and must be a string"),
+    };
+    if name.is_empty() {
+        return tool_error("`name` must not be empty");
+    }
+    if name.chars().count() > 64 {
+        return tool_error("`name` must be 64 characters or fewer");
+    }
+    match resolve_or_create_collection(db, name) {
+        Ok(id) => tool_text(&format!(
+            "Collection ready.\n  id:    {id}\n  name:  {name}\n"
+        )),
+        Err(e) => tool_error(&format!("create_collection: {e}")),
+    }
+}
+
+fn handle_assign_to_collection(args: &Value, db: &Database) -> Value {
+    let name = match args.get("collection_name").and_then(|v| v.as_str()) {
+        Some(s) => s.trim(),
+        None => return tool_error("`collection_name` is required and must be a string"),
+    };
+    if name.is_empty() {
+        return tool_error("`collection_name` must not be empty");
+    }
+
+    let ids: Vec<String> = match args.get("document_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        None => {
+            return tool_error(
+                "`document_ids` is required and must be a non-empty array of strings",
+            )
+        }
+    };
+    if ids.is_empty() {
+        return tool_error("`document_ids` must contain at least one non-empty string");
+    }
+    if ids.len() > ASSIGN_TO_COLLECTION_MAX_IDS {
+        return tool_error(&format!(
+            "{} document_ids supplied; max is {} per call.",
+            ids.len(),
+            ASSIGN_TO_COLLECTION_MAX_IDS
+        ));
+    }
+
+    let collection_id = match resolve_or_create_collection(db, name) {
+        Ok(id) => id,
+        Err(e) => return tool_error(&format!("collection: {e}")),
+    };
+
+    // Pre-filter to known document_ids. collection_add_documents is
+    // FK-bound and would error on the first unknown id; the MCP
+    // contract says unknown ids are silently dropped + reported in
+    // the response so agents can pass a "best-effort" list of
+    // candidates without having to verify each id first.
+    let known_ids = match db.filter_existing_document_ids(&ids) {
+        Ok(v) => v,
+        Err(e) => return tool_error(&format!("filter_existing_document_ids: {e}")),
+    };
+    let unknown_count = ids.len() - known_ids.len();
+
+    match db.collection_add_documents(collection_id, &known_ids) {
+        Ok(added) => {
+            // Known but not added => already a member (INSERT OR IGNORE
+            // saw a conflict).
+            let already_member = known_ids.len() - added;
+            tracing::info!(
+                collection_id,
+                collection = name,
+                requested = ids.len(),
+                added,
+                already_member,
+                unknown = unknown_count,
+                "mcp assign_to_collection"
+            );
+            tool_text(&format!(
+                "Assigned to collection.\n  collection:    {name} (id={collection_id})\n  requested:     {req}\n  added:         {added}\n  already there: {already_member}\n  unknown id:    {unknown_count}\n",
+                req = ids.len(),
+            ))
+        }
+        Err(e) => tool_error(&format!("collection_add_documents: {e}")),
+    }
+}
+
 pub fn print_client_config(client: &str, _vault_path: &Path) -> Result<()> {
     let bin = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -524,7 +1070,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_has_expected_count() {
         let defs = tool_definitions();
-        assert_eq!(defs["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(defs["tools"].as_array().unwrap().len(), 10);
     }
 
     #[test]
@@ -536,6 +1082,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
+        // Read tools.
         assert!(names.contains(&"search_knowledge"));
         assert!(names.contains(&"list_sources"));
         assert!(names.contains(&"get_document"));
@@ -543,6 +1090,10 @@ mod tests {
         assert!(names.contains(&"vault_stats"));
         assert!(names.contains(&"list_collections"));
         assert!(names.contains(&"get_chunk_context"));
+        // Write tools (v2.8.0).
+        assert!(names.contains(&"add_to_vault"));
+        assert!(names.contains(&"create_collection"));
+        assert!(names.contains(&"assign_to_collection"));
     }
 
     #[test]
@@ -586,7 +1137,7 @@ mod tests {
             &Embedder::fixed(384),
         )
         .await;
-        assert_eq!(result["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 10);
     }
 
     #[tokio::test]

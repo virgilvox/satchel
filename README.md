@@ -283,17 +283,29 @@ No data leaves your machine. No internet needed after download.
 
 ## MCP Tools
 
-When connected, your AI client can use these tools:
+When connected, your AI client can use these tools.
+
+**Read side** (always safe; no DB writes):
 
 | Tool | What it does |
 |------|-------------|
-| `search_knowledge` | Hybrid retrieval (dense cosine + BM25 via FTS5, fused with Reciprocal Rank Fusion). Returns ranked chunks with `chunk_id`, source path, and tags. Accepts `collection_name`, `filter_source`, `filter_tags`. |
+| `search_knowledge` | Hybrid retrieval (dense cosine + BM25 via FTS5, fused with Reciprocal Rank Fusion). Returns ranked chunks with `chunk_id`, source path, and tags. Accepts `collection_name`, `filter_source`, `filter_tags`, `filter_file_type`. |
 | `get_chunk_context` | Expand a search hit by N chunks before and after, scoped to the same document. Use after `search_knowledge` when the matched chunk is a short or ambiguous fragment (a single chat message, a sentence quoting an earlier referent). Pass the hit's `chunk_id` plus `before`/`after` windows. |
 | `list_sources` | List ingested documents grouped by source path, with record and chunk counts. Paginated. |
 | `get_document` | Retrieve the full text of a document by source path or document id. |
 | `list_collections` | List the named collections (subsets) in the vault. |
 | `list_tags` | List tags and per-tag document counts. |
 | `vault_stats` | Storage stats, document and chunk counts, embedding model info. |
+
+**Write side** (v2.8.0+; agents are instructed to only call these on explicit user intent like "save this"):
+
+| Tool | What it does |
+|------|-------------|
+| `add_to_vault` | Save a text snippet, markdown document, or any other textual content. Goes through the same chunk + embed + index pipeline as file ingest, so MCP-added notes behave identically in search and `get_chunk_context`. Accepts `title`, `source` (defaults to `mcp://note/<uuid>`), `file_type`, `tags`, `collection_name` (auto-created), and `dry_run`. 5 MB cap; SHA-256 dedup so a re-save is a safe no-op (still honors collection_name and tags). |
+| `create_collection` | Pre-create a named collection. Idempotent on case-insensitive match. |
+| `assign_to_collection` | Add existing documents (by `document_id`) to a named collection. Auto-creates the collection if missing. Unknown ids are silently dropped and reported in the response. Cap of 200 ids per call. |
+
+Delete is intentionally **not** exposed via MCP — your AI client should not be able to remove your data. The write surface is opt-in per call; the binary's default system prompt teaches the model to only call write tools on explicit user intent and to use `dry_run: true` for large pastes.
 
 ## Managing Your Data
 
@@ -309,8 +321,6 @@ satchel clear                               # wipe entire active vault
 ```
 
 The Manage tab in the web UI exposes the same operations with confirmation dialogs.
-
-Delete is intentionally **not** exposed via MCP — your AI client should not be able to remove your data.
 
 ## REST API
 
