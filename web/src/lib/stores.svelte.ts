@@ -163,6 +163,14 @@ const CHAT_KEYS = {
   anthropicMaxTokens: 'satchel-chat-anthropic-max-tokens',
   anthropicCaching: 'satchel-chat-anthropic-caching',
   anthropicSystemPrompt: 'satchel-chat-anthropic-system',
+  // v2.9.0 smart-mode keys. These gate the agent-loop optimizations
+  // designed for small browser LLMs: tool-result truncation, stall
+  // detection, context-aware early stopping, transcript compaction,
+  // and the compact WebLLM system prompt. Defaults are aggressive on
+  // for WebLLM and off for Anthropic.
+  smartMode: 'satchel-chat-smart-mode',
+  toolResultMaxTokens: 'satchel-chat-tool-result-max-tokens',
+  autoCompact: 'satchel-chat-auto-compact',
 };
 
 export type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -282,6 +290,12 @@ class ChatSettingsStore {
   anthropicMaxTokens = $state(readNumber(CHAT_KEYS.anthropicMaxTokens, 16000));
   anthropicCaching = $state(readBool(CHAT_KEYS.anthropicCaching, true));
   anthropicSystemPrompt = $state(safeGet(CHAT_KEYS.anthropicSystemPrompt) ?? DEFAULT_ANTHROPIC_SYSTEM);
+  // v2.9.0 smart-mode. ON by default; if the local LLM was working
+  // fine for a user already, they keep that experience (the
+  // optimizations only kick in when context pressure rises).
+  smartMode = $state(readBool(CHAT_KEYS.smartMode, true));
+  toolResultMaxTokens = $state(readNumber(CHAT_KEYS.toolResultMaxTokens, 800));
+  autoCompact = $state(readBool(CHAT_KEYS.autoCompact, true));
 
   setTemperature(v: number) { this.temperature = v; safeSet(CHAT_KEYS.temperature, String(v)); }
   setMaxTokens(v: number) { this.maxTokens = v; safeSet(CHAT_KEYS.maxTokens, String(v)); }
@@ -298,6 +312,12 @@ class ChatSettingsStore {
   setAnthropicCaching(v: boolean) { this.anthropicCaching = v; safeSet(CHAT_KEYS.anthropicCaching, v ? '1' : '0'); }
   setAnthropicSystemPrompt(v: string) { this.anthropicSystemPrompt = v; safeSet(CHAT_KEYS.anthropicSystemPrompt, v); }
   resetAnthropicSystemPrompt() { this.setAnthropicSystemPrompt(DEFAULT_ANTHROPIC_SYSTEM); }
+  setSmartMode(v: boolean) { this.smartMode = v; safeSet(CHAT_KEYS.smartMode, v ? '1' : '0'); }
+  setToolResultMaxTokens(v: number) {
+    this.toolResultMaxTokens = v;
+    safeSet(CHAT_KEYS.toolResultMaxTokens, String(v));
+  }
+  setAutoCompact(v: boolean) { this.autoCompact = v; safeSet(CHAT_KEYS.autoCompact, v ? '1' : '0'); }
 }
 
 class SettingsStore {

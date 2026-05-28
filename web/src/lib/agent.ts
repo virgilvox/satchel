@@ -293,3 +293,257 @@ Round 2: (after seeing results) {"thought": "Found relevant chunks with high sco
 Round 3+: more searches as needed
 Final: {"thought": "I have enough evidence to answer.", "tool_call": {"name": "respond_to_user", "arguments": {"answer": "HeatSync Labs is... (cite sources)"}}}`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Smart-mode helpers (v2.9.0). Backend-aware tool-result handling,
+// stall detection, and transcript compaction for small local LLMs.
+//
+// Why: local browser LLMs have small context (typically 4-8K usable),
+// no prompt cache, and slow inference. The default chat loop's verbose
+// tool results, repeating tool schemas, and fixed max_rounds combine
+// into a "ran out of context before answering" failure mode that
+// plagues every multi-round agent. These helpers fix the worst of it
+// without changing the protocol the model sees.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Rough byte-to-token conversion. Matches the server-side estimator
+ *  in src/ingest/mod.rs (`approximate_tokens`); good enough for budget
+ *  gating without paying a real tokenizer roundtrip. */
+export function approximateTokens(text: string): number {
+  return Math.ceil((text?.length ?? 0) / 4);
+}
+
+export interface TruncateOpts {
+  /** Hard cap on output token count. Caller passes the per-backend
+   *  default (800 for WebLLM, undefined / very large for Anthropic). */
+  maxTokens: number;
+  /** Optional pointer the agent can use to recover the dropped tail.
+   *  When set, the truncation marker mentions it explicitly. */
+  recoverHint?: string;
+}
+
+/**
+ * Cap a tool result at `maxTokens` while preserving the head (most
+ * search engines and list tools put the most useful content there).
+ * Appended marker tells the model how much was dropped and how to get
+ * the rest, so the next round can do a targeted follow-up tool call
+ * instead of re-issuing the same expensive search.
+ *
+ * When the input already fits under the budget, returned verbatim
+ * (no copy in the hot path).
+ */
+export function truncateToolResult(text: string, opts: TruncateOpts): string {
+  if (!text) return '';
+  const tokens = approximateTokens(text);
+  if (tokens <= opts.maxTokens) return text;
+  // Convert token budget back to chars (4:1). Leave headroom for the
+  // marker so the FINAL emitted result still fits the budget cleanly.
+  const markerHint = opts.recoverHint
+    ? ` Use \`${opts.recoverHint}\` to fetch the rest.`
+    : '';
+  const marker = `\n\n... [truncated ${tokens - opts.maxTokens} more tokens of output.${markerHint}]`;
+  const markerTokens = approximateTokens(marker);
+  const slackTokens = Math.max(opts.maxTokens - markerTokens, 1);
+  const charBudget = slackTokens * 4;
+  // Walk back to a UTF-8 char boundary to avoid splitting a multibyte
+  // char or emoji mid-stream.
+  let cut = Math.min(charBudget, text.length);
+  while (cut > 0 && cut < text.length) {
+    const code = text.charCodeAt(cut);
+    // High surrogate — back up one.
+    if (code >= 0xd800 && code <= 0xdbff) {
+      cut -= 1;
+      continue;
+    }
+    break;
+  }
+  return text.slice(0, cut) + marker;
+}
+
+/**
+ * Stable fingerprint for a tool call. Used by the agent loop to detect
+ * "the model just emitted the same tool call as last round," which is
+ * the most common local-LLM failure mode (loops the same search with
+ * tiny argument variations). Keys are sorted so {a: 1, b: 2} and
+ * {b: 2, a: 1} hash to the same string.
+ */
+export function hashToolCall(name: string, args: unknown): string {
+  return name + '|' + canonicalJsonStringify(args ?? {});
+}
+
+function canonicalJsonStringify(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return '[' + v.map(canonicalJsonStringify).join(',') + ']';
+  const obj = v as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return (
+    '{' +
+    keys.map((k) => JSON.stringify(k) + ':' + canonicalJsonStringify(obj[k])).join(',') +
+    '}'
+  );
+}
+
+/** What the agent loop concluded about the last tool call attempt. */
+export type StallDecision =
+  | { kind: 'ok' }
+  | { kind: 'duplicate'; previousHash: string }
+  | { kind: 'context-full'; usedFraction: number };
+
+/**
+ * Decide whether to abort the round and force a final-answer attempt.
+ *
+ *  - `duplicate` fires when the most recent tool call hash equals the
+ *    one before it. The loop should inject a synthetic tool_result
+ *    asking the model to either pick a different angle or call
+ *    respond_to_user.
+ *  - `context-full` fires at the configurable fraction (default 0.75)
+ *    so the model has room for ONE more turn to wrap up before the
+ *    window blows. Without this guard the model usually overruns and
+ *    WebLLM throws "Prompt tokens exceed context window size".
+ */
+export function detectStallPattern(opts: {
+  toolHashHistory: string[];
+  contextUsedTokens: number;
+  contextWindowTokens: number;
+  contextFullFraction?: number;
+}): StallDecision {
+  const fullFrac = opts.contextFullFraction ?? 0.75;
+  const used =
+    opts.contextWindowTokens > 0
+      ? opts.contextUsedTokens / opts.contextWindowTokens
+      : 0;
+  if (opts.contextWindowTokens > 0 && used >= fullFrac) {
+    return { kind: 'context-full', usedFraction: used };
+  }
+  const h = opts.toolHashHistory;
+  if (h.length >= 2 && h[h.length - 1] === h[h.length - 2]) {
+    return { kind: 'duplicate', previousHash: h[h.length - 1] };
+  }
+  return { kind: 'ok' };
+}
+
+/**
+ * Compact a transcript to fit a token budget by replacing the oldest
+ * tool_use + tool_result pairs with one-line summaries lifted from
+ * the model's own `thought` field. The system prompt, every user
+ * message, and the most recent K tool exchanges are preserved
+ * verbatim so the model still has fresh evidence to work with.
+ *
+ *  - input transcript: `{role, tokens, text, isToolPair?, summary?}`
+ *  - returns the same transcript with oldest tool pairs replaced
+ *  - idempotent: if everything already fits, returns the input
+ *
+ * The shape is deliberately storage-agnostic so this can run against
+ * either the WebLLM constrained-mode transcript or the Anthropic
+ * messages array.
+ */
+export interface CompactItem {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  text: string;
+  tokens: number;
+  /** True when this item is part of an assistant→tool→result triplet
+   *  that compaction is allowed to collapse. Plain user/assistant turns
+   *  are never collapsed. */
+  isToolPair?: boolean;
+  /** Pre-computed compaction summary the agent's `thought` field
+   *  produced. Used as the replacement text when this pair is dropped. */
+  summary?: string;
+}
+
+export function compactTranscript(
+  items: CompactItem[],
+  opts: { budgetTokens: number; keepRecentToolPairs?: number },
+): CompactItem[] {
+  const keep = opts.keepRecentToolPairs ?? 2;
+  const total = items.reduce((sum, it) => sum + it.tokens, 0);
+  if (total <= opts.budgetTokens) return items;
+
+  // Identify tool-pair items by index, oldest first.
+  const pairIdx: number[] = items
+    .map((it, i) => (it.isToolPair ? i : -1))
+    .filter((i) => i >= 0);
+  if (pairIdx.length <= keep) return items;
+
+  // Drop oldest pairs (keep the most recent `keep`) one at a time
+  // until we fit the budget or run out of compactable items.
+  const dropCount = pairIdx.length - keep;
+  const out = items.slice();
+  let dropped = 0;
+  for (let i = 0; i < dropCount; i++) {
+    const idx = pairIdx[i];
+    const item = out[idx];
+    const summaryText = item.summary
+      ? `[compacted: ${item.summary}]`
+      : `[compacted: prior ${item.role} turn dropped to free context]`;
+    out[idx] = {
+      role: item.role,
+      text: summaryText,
+      tokens: approximateTokens(summaryText),
+      isToolPair: item.isToolPair,
+      summary: item.summary,
+    };
+    dropped += item.tokens - out[idx].tokens;
+    if (total - dropped <= opts.budgetTokens) break;
+  }
+  return out;
+}
+
+/**
+ * Synthetic tool result the loop injects when stall detection fires
+ * with `duplicate`. The model sees this on its next round and has a
+ * clear nudge to either change angle or finalize.
+ */
+export function stallNudgeToolResult(): string {
+  return (
+    'You just issued an identical tool call to the previous round. ' +
+    'Either pick a different search query / source / chunk_id, or call ' +
+    '`respond_to_user` with the best answer you can give from the ' +
+    'evidence you already have.'
+  );
+}
+
+/**
+ * Synthetic tool result for `context-full`. Tells the model it must
+ * wrap up THIS round.
+ */
+export function contextFullNudgeToolResult(usedFraction: number): string {
+  const pct = Math.round(usedFraction * 100);
+  return (
+    `Context is at ${pct}% of the model window. No more tool calls; ` +
+    'call `respond_to_user` now with the best synthesis you can give from ' +
+    'the evidence you already have. Cite sources from the tool results above.'
+  );
+}
+
+/**
+ * Compact alternative to `constrainedSystemPrompt` for small local
+ * models. ~500 tokens vs. the verbose Anthropic-shaped prompt. Strict
+ * operational shape, concrete one-liner per tool, two worked
+ * examples. No style guidance ("no AI cliches" etc.) because small
+ * models don't follow it anyway and the tokens are better spent on
+ * tool-use mechanics.
+ */
+export function compactSystemPrompt(opts: {
+  tools: McpTool[];
+  minToolCalls: number;
+}): string {
+  const { tools, minToolCalls } = opts;
+  const lines = tools.map((t) => `- ${t.name}: ${t.description?.split(/\.|\n/)[0] ?? '(no description)'}`);
+  return `You are SATCHEL, an agent over the user's local vault. Emit ONE JSON object per turn:
+{"thought":"...","tool_call":{"name":"...","arguments":{...}}}
+
+Tools (only these exist; "respond_to_user" is the pseudo-tool to finalize):
+${lines.join('\n')}
+- respond_to_user: {"answer": "<final answer with citations>"}
+
+Rules:
+- Call at least ${minToolCalls} real tool(s) before respond_to_user.
+- search_knowledge is almost always the first call. Use a single-sentence query.
+- If a result is too long, it ends with "[truncated ... call get_chunk_context for the rest]" and the chunk_id you need.
+- Don't repeat an identical tool call; vary your query or pick a different tool.
+
+Example:
+User: what is heatsync labs
+Round 1: {"thought":"Need to search the vault.","tool_call":{"name":"search_knowledge","arguments":{"query":"heatsync labs"}}}
+Round 2: {"thought":"Got 3 chunks describing HeatSync Labs as a makerspace.","tool_call":{"name":"respond_to_user","arguments":{"answer":"HeatSync Labs is a community makerspace in Mesa, AZ ..."}}}`;
+}

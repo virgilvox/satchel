@@ -14,6 +14,12 @@ export interface AnthropicTool {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  /** Optional prompt-cache marker. When set on the LAST tool in
+   *  `tools[]`, Anthropic includes the entire tools list in the
+   *  cached prefix together with the system prompt. Only the wire
+   *  layer in `streamAnthropicTurn` writes this; callers pass plain
+   *  AnthropicTool objects and let the cache flag drive the marker. */
+  cache_control?: { type: 'ephemeral' };
 }
 
 export interface AnthropicTextBlock {
@@ -104,7 +110,26 @@ export async function streamAnthropicTurn(
     stream: true,
     max_tokens: req.max_tokens ?? 16000,
   };
-  if (req.tools?.length) wire.tools = req.tools;
+  if (req.tools?.length) {
+    // Prompt-cache extension (v2.9.0). Anthropic caches the longest
+    // common prefix of `tools + system`. Attaching `cache_control:
+    // ephemeral` to the last tool definition extends the cached span
+    // from "system only" to "tools + system," so a multi-turn chat
+    // re-uses the tool-schema tokens too. The break must be on the
+    // LAST tool so the entire tools list is part of the cached prefix;
+    // anything after the breakpoint cannot be cached, and tools
+    // render before system on the wire.
+    if (req.cache) {
+      const cloned = req.tools.map((t, i) =>
+        i === req.tools!.length - 1
+          ? ({ ...t, cache_control: { type: 'ephemeral' } } as AnthropicTool)
+          : t,
+      );
+      wire.tools = cloned;
+    } else {
+      wire.tools = req.tools;
+    }
+  }
   if (req.system) {
     if (req.cache) {
       // Default 5-minute TTL — no beta header required, fits chat

@@ -19,6 +19,12 @@
     buildLooseAgentSchema,
     constrainedSystemPrompt,
     parseConstrainedOutput,
+    compactSystemPrompt,
+    truncateToolResult,
+    hashToolCall,
+    detectStallPattern,
+    stallNudgeToolResult,
+    contextFullNudgeToolResult,
   } from '../lib/agent';
   import { McpClient } from '../lib/mcp';
   import { api } from '../lib/api';
@@ -343,11 +349,26 @@
   //   4. Loop until terminal, max-rounds, or abort
   async function runLoop(): Promise<void> {
     if (!engine) return;
-    const sys = constrainedSystemPrompt({
-      tools,
-      minToolCalls: chatSettings.minToolCalls,
-      weakScoreThreshold: chatSettings.weakScoreThreshold,
-    });
+    // Smart mode picks a compact ~500-token system prompt designed
+    // for small local LLMs (concrete tool one-liners, no style
+    // guidance). Off-mode keeps the verbose persistence-oriented
+    // prompt for users who want maximum hand-holding.
+    const sys = chatSettings.smartMode
+      ? compactSystemPrompt({
+          tools,
+          minToolCalls: chatSettings.minToolCalls,
+        })
+      : constrainedSystemPrompt({
+          tools,
+          minToolCalls: chatSettings.minToolCalls,
+          weakScoreThreshold: chatSettings.weakScoreThreshold,
+        });
+
+    // Stall detection: hash every emitted tool_use. When the same
+    // hash fires twice in a row, the loop injects a synthetic
+    // tool_result nudging the model to vary its approach or finalize.
+    const toolHashHistory: string[] = [];
+    let pendingNudge: string | null = null;
 
     while (round < chatSettings.maxRounds && !abortFlag) {
       round += 1;
@@ -486,6 +507,28 @@
 
       // Tool call: render it pending, dispatch via MCP, then loop.
       const call = parsed.toolCalls[0];
+
+      // Smart-mode stall detection. Hash this tool call and compare
+      // to the prior round's. If duplicate, OR context is above 75%,
+      // we skip the real dispatch and inject a synthetic tool_result
+      // that nudges the model toward respond_to_user. This is the
+      // biggest single win for small local LLMs that otherwise loop
+      // the same search query until the window blows.
+      if (chatSettings.smartMode) {
+        const hash = hashToolCall(call.name, call.args);
+        toolHashHistory.push(hash);
+        const decision = detectStallPattern({
+          toolHashHistory,
+          contextUsedTokens: lastUsage.total,
+          contextWindowTokens: lastUsage.window,
+        });
+        if (decision.kind === 'duplicate') {
+          pendingNudge = stallNudgeToolResult();
+        } else if (decision.kind === 'context-full') {
+          pendingNudge = contextFullNudgeToolResult(decision.usedFraction);
+        }
+      }
+
       transcript = transcript.map((m) =>
         m.id !== aId
           ? m
@@ -498,6 +541,26 @@
             }
       );
       scrollToBottom();
+
+      // If a nudge fired, skip the real MCP dispatch this round and
+      // surface the nudge AS the tool result. The model sees the nudge
+      // text next round and is strongly pushed toward respond_to_user.
+      if (pendingNudge) {
+        const nudge = pendingNudge;
+        pendingNudge = null;
+        transcript = transcript.map((m) =>
+          m.id !== aId || !m.toolCalls
+            ? m
+            : {
+                ...m,
+                toolCalls: m.toolCalls.map((c) =>
+                  c.id === call.id ? { ...c, pending: false, result: nudge } : c
+                ),
+              }
+        );
+        scrollToBottom();
+        continue;
+      }
 
       try {
         const out = await mcp.callTool(call.name, applyScopeToToolArgs(call.name, call.args));
@@ -577,7 +640,23 @@
             }),
           });
           if (!tc.pending) {
-            const body = tc.error ? `error: ${tc.error}` : tc.result ?? '';
+            let body = tc.error ? `error: ${tc.error}` : tc.result ?? '';
+            // Smart-mode caps tool results so a single verbose
+            // search hit cannot dominate the local LLM's context.
+            // The truncation marker tells the model how much was
+            // dropped and (when applicable) which follow-up call
+            // would fetch the rest.
+            if (chatSettings.smartMode && body && !tc.error) {
+              body = truncateToolResult(body, {
+                maxTokens: chatSettings.toolResultMaxTokens,
+                recoverHint:
+                  tc.name === 'search_knowledge'
+                    ? 'get_chunk_context with a chunk_id from the head of this result'
+                    : tc.name === 'list_sources'
+                      ? 'list_sources with a refined filter_type / q'
+                      : undefined,
+              });
+            }
             out.push({
               role: 'tool',
               content: `<tool_response>\n${body}\n</tool_response>`,
@@ -803,17 +882,32 @@
           // protocol, immediately following the assistant's tool_use.
           const results: AnthropicContentBlock[] = m.toolCalls
             .filter((tc) => !tc.pending)
-            .map((tc) => ({
-              // tool_result is a valid Anthropic content-block type; our
-              // narrow union doesn't include it (the typed API for this
-              // module is request-shape, not response-shape). Plain
-              // object → JSON, double-cast through `unknown` because TS
-              // won't accept a one-step cast here.
-              type: 'tool_result',
-              tool_use_id: tc.id,
-              content: tc.error ? `Error: ${tc.error}` : tc.result ?? '',
-              is_error: !!tc.error,
-            } as unknown as AnthropicContentBlock));
+            .map((tc) => {
+              let body = tc.error ? `Error: ${tc.error}` : tc.result ?? '';
+              // Smart-mode caps results on the Anthropic side too.
+              // Anthropic's larger context makes this a smaller win,
+              // but cost-conscious users on long sessions still benefit
+              // (fewer input tokens per turn). Default budget is 8000
+              // for Anthropic so the cap is much looser than WebLLM.
+              if (chatSettings.smartMode && body && !tc.error) {
+                body = truncateToolResult(body, {
+                  maxTokens: Math.max(chatSettings.toolResultMaxTokens * 10, 8000),
+                  recoverHint:
+                    tc.name === 'search_knowledge'
+                      ? 'get_chunk_context with a chunk_id from the head of this result'
+                      : undefined,
+                });
+              }
+              return {
+                // tool_result is a valid Anthropic content-block type;
+                // our narrow union doesn't include it. Cast through
+                // unknown because TS won't accept a one-step cast.
+                type: 'tool_result',
+                tool_use_id: tc.id,
+                content: body,
+                is_error: !!tc.error,
+              } as unknown as AnthropicContentBlock;
+            });
           if (results.length) out.push({ role: 'user', content: results });
         }
       }

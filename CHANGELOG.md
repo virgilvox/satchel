@@ -1,5 +1,83 @@
 # Changelog
 
+## v2.9.0 (2026-05-28)
+
+### Smart agent mode for local LLMs (and Anthropic too)
+
+Browser WebLLM has small context, slow inference, and no prompt
+cache. The default chat loop's verbose tool results + repeating tool
+schemas + fixed `max_rounds=10` combined into a "ran out of context
+before answering" failure mode that hit on almost every multi-step
+question. v2.9.0 adds Smart agent mode (on by default), shipping
+five fixes:
+
+1. **Backend-aware tool-result truncation** (`truncateToolResult` in
+   `agent.ts`). WebLLM caps each tool result at 800 tokens (slider in
+   Settings; range 256-4000). The truncation marker tells the model
+   how much was dropped and which follow-up call would fetch the
+   rest, e.g. `[truncated 1240 more tokens of output. Use
+   get_chunk_context with a chunk_id from the head of this result to
+   fetch the rest.]`. Anthropic gets a 10x looser cap (default 8000)
+   because its context is bigger; cost-conscious users on long
+   sessions still benefit.
+
+2. **Stall detection** (`hashToolCall` + `detectStallPattern`). Every
+   emitted tool_use is fingerprinted; an identical hash twice in a
+   row injects a synthetic tool_result that nudges the model to
+   either vary its approach or call `respond_to_user`. This is the
+   single biggest win for small local models that otherwise loop the
+   same search until the window blows.
+
+3. **Context-pressure early stopping**. When context use crosses 75%
+   of the model's window, the loop forces a final-answer round
+   instead of running another tool call. `max_rounds` becomes a
+   fallback ceiling, not the primary stopper.
+
+4. **Compact WebLLM system prompt** (`compactSystemPrompt`). ~500
+   tokens vs the 3K-token Anthropic-shaped prompt. Concrete tool
+   one-liners, two worked examples, no style guidance (small models
+   do not follow "no AI cliches" anyway and the tokens are better
+   spent on tool-use mechanics).
+
+5. **Anthropic prompt caching extended to tools block**. The cache
+   breakpoint now attaches to the LAST tool in `tools[]` instead of
+   just the system prompt, so the cached prefix covers the full
+   `tools + system` instead of system alone. Multi-turn chats reuse
+   the entire schema block; cache_read_input_tokens climbs
+   proportionally on long sessions.
+
+### Settings exposure
+
+Settings -> Cloud -> SMART AGENT MODE section:
+
+- **smart_mode** toggle, default on.
+- **tool_result_max_tokens** slider (256-4000, default 800).
+
+`auto_compact` is in the store but the in-loop transcript-compaction
+implementation slipped to v2.9.1; truncation + stall handle the
+common cases already.
+
+### Tests
+
+Vitest infrastructure added to `web/`. 26 new TS unit tests in
+`web/src/lib/agent.test.ts` covering: token approximation,
+truncation byte-boundary safety, hash determinism + order
+independence, stall detection edge cases (no history, duplicate,
+context full, zero window), transcript-compaction structural
+guarantees, nudge strings, compact-prompt size. Hook: `npm test`
+from `web/`.
+
+287 tests passing total (261 Rust + 26 TS).
+
+### Migration notes for existing chats
+
+- Default behavior changes for WebLLM users: shorter system prompt,
+  tool results capped, loop exits earlier on stall. If you were
+  relying on the verbose prompt or full-fat tool results, toggle
+  off Smart mode in Settings.
+- Anthropic users: behaviorally the same answers, just a smaller
+  prompt-cache miss on each new tool definition load.
+
 ## v2.8.3 (2026-05-28)
 
 ### Claude Haiku no longer triggers 400s from extended-thinking knobs
