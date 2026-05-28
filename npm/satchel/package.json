@@ -1,6 +1,6 @@
 {
   "name": "satchel-rag",
-  "version": "2.7.1",
+  "version": "2.8.0",
   "description": "Portable RAG system. Single binary, local embeddings, MCP protocol.",
   "license": "MIT",
   "repository": {
@@ -23,10 +23,10 @@
     "bin.js"
   ],
   "optionalDependencies": {
-    "satchel-rag-darwin-arm64": "^2.7.1",
-    "satchel-rag-darwin-x64": "^2.7.1",
-    "satchel-rag-linux-arm64": "^2.7.0",
-    "satchel-rag-linux-x64": "^2.7.0",
-    "satchel-rag-windows-x64": "^2.7.0"
+    "satchel-rag-darwin-arm64": "^2.8.0",
+    "satchel-rag-darwin-x64": "^2.8.0",
+    "satchel-rag-linux-arm64": "^2.8.0",
+    "satchel-rag-linux-x64": "^2.8.0",
+    "satchel-rag-windows-x64": "^2.8.0"
   }
 }
