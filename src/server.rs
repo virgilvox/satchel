@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, Query, State},
+    extract::{DefaultBodyLimit, Json, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -155,6 +155,14 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
         )
         .route("/api/connect-info", get(api_connect_info))
         .route("/api/mdns", get(api_mdns_get).post(api_mdns_set))
+        // Lift axum's per-`Json<T>` body limit (default 2 MB) to 64 MB
+        // so the transport does not cap us below the MCP `add_to_vault`
+        // 50 MB content limit. 64 MB leaves ~14 MB headroom for JSON
+        // wrapping overhead (escapes, key names, base64 boundaries).
+        // Applies to every route on this router; the MCP and ingest
+        // paths are the only ones that practically push it, but a
+        // uniform setting beats a route-by-route override.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)

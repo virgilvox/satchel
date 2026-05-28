@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.8.1 (2026-05-28)
+
+### Larger documents via add_to_vault
+
+Raise the `add_to_vault` MCP tool's content cap from 5 MB to 50 MB so
+a real book, a thick PDF's extracted text, or a multi-day chat
+export's text fields can land in the vault through one tool call.
+The chunker, embedder, and SQLite storage handle the higher cap
+without changes; embedding cost scales linearly so a full 50 MB
+paste still ties up the tool call for a few minutes. The tool
+description was updated to warn the model to flag long pastes
+before committing.
+
+### HTTP body limit lifted to 64 MB
+
+Axum's default `Json<T>` body limit (2 MB) was the hidden ceiling
+for both `POST /mcp` and `POST /api/ingest`; a 4 MB MCP tool call
+would have 413'd before reaching the handler, well below the
+`add_to_vault` cap. The router now applies
+`DefaultBodyLimit::max(64 MB)` globally. New
+`test_post_api_search_accepts_large_body` regression guard.
+
 ## v2.8.0 (2026-05-28)
 
 ### MCP write surface: add_to_vault, create_collection, assign_to_collection

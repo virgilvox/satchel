@@ -324,3 +324,22 @@ async fn test_cors_headers_present() {
         .unwrap();
     assert!(resp.headers().get("access-control-allow-origin").is_some());
 }
+
+#[tokio::test]
+async fn test_post_api_search_accepts_large_body() {
+    // Regression guard for the v2.8.1 body-limit bump. Axum's
+    // default Json<T> body limit is 2 MB, which would have capped MCP
+    // and ingest payloads below the tool's own 50 MB cap. The router
+    // now sets DefaultBodyLimit::max(64 MB) so this 4 MB POST must
+    // pass through without a 413.
+    let big_query: String = "x".repeat(4 * 1024 * 1024);
+    let body = format!(r#"{{"query":{:?},"top_k":1}}"#, big_query);
+    let (status, json) = post_json("/api/search", &body).await;
+    assert_eq!(
+        status, 200,
+        "expected 200 (router body limit must accept 4 MB), got {status} body={json}"
+    );
+    // The search itself returns 0 results on an empty test DB; the
+    // important assertion is that the transport did not 413.
+    assert!(json["results"].is_array());
+}

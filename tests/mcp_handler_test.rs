@@ -541,12 +541,11 @@ async fn test_mcp_add_to_vault_rejects_empty_content() {
 
 #[tokio::test]
 async fn test_mcp_add_to_vault_rejects_oversized_content() {
-    // 6 MB > 5 MB cap. We do not actually allocate that much; we use
-    // String::with_capacity then push a single byte 6_291_457 times.
-    // That is fast and exercises the size check.
+    // 51 MB > 50 MB cap. The repeat is fast and `assert_err_contains`
+    // short-circuits before we ever try to chunk or embed the buffer.
     let db = common::test_db();
     let embedder = common::test_embedder();
-    let payload: String = "x".repeat(6 * 1024 * 1024);
+    let payload: String = "x".repeat(51 * 1024 * 1024);
     let r = mcp::handle_request(
         &call_tool("add_to_vault", json!({ "content": payload })),
         &db,

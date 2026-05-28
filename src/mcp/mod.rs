@@ -169,14 +169,14 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "add_to_vault",
-                "description": "Save a text snippet, markdown document, or any other textual content into the vault so it becomes searchable. Use this when the user asks to remember a quote, paste a document, capture a synthesis of the current conversation, or commit a note for later retrieval. Content is chunked, embedded, and indexed alongside everything else. Returns a stable document_id you can pass to `assign_to_collection` or `get_document` later. Identical content is deduplicated by SHA-256, so calling twice is a safe no-op (the second call still honors collection_name and tags so re-ingesting into a new collection actually works). Do not call this without an explicit user intent to save; treat each invocation as a privileged write that the user has authorized for this turn.",
+                "description": "Save a text snippet, markdown document, or any other textual content into the vault so it becomes searchable. Use this when the user asks to remember a quote, paste a document, capture a synthesis of the current conversation, or commit a note for later retrieval. Content is chunked, embedded, and indexed alongside everything else. Returns a stable document_id you can pass to `assign_to_collection` or `get_document` later. Identical content is deduplicated by SHA-256, so calling twice is a safe no-op (the second call still honors collection_name and tags so re-ingesting into a new collection actually works). Do not call this without an explicit user intent to save; treat each invocation as a privileged write that the user has authorized for this turn. Cap is 50 MB; large pastes (>10 MB) take a few minutes synchronously while every chunk is embedded, so warn the user before committing a big one.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["content"],
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "The text to save. Plain text, markdown, JSON, HTML, or code. Required; must be non-empty after trimming; capped at 5 MB."
+                            "description": "The text to save. Plain text, markdown, JSON, HTML, or code. Required; must be non-empty after trimming; capped at 50 MB. For anything bigger, save the file on disk and use `satchel ingest <path>` so the work runs as a tracked background job instead of blocking a single tool call."
                         },
                         "title": {
                             "type": "string",
@@ -546,12 +546,17 @@ fn handle_list_collections(db: &Database) -> Value {
 // what their agent has been saving.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Hard cap on add_to_vault content size. 5 MB is enough for any
-/// reasonable paste (a whole Linux source file, a chapter of a book,
-/// a full Slack daily export's text fields) without giving an
-/// agent a giant footgun. Bigger payloads should land on disk first
-/// and be ingested with `satchel ingest <path>`.
-const ADD_TO_VAULT_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// Hard cap on add_to_vault content size. 50 MB covers genuinely
+/// large pastes (a whole book, a thick PDF's extracted text, a
+/// multi-day chat export's text fields) while staying safely under
+/// the HTTP body limit applied at the router layer (64 MB) and
+/// commodity-machine memory. Bigger payloads should land on disk and
+/// use `satchel ingest <path>`, where the work runs in a tracked
+/// background job rather than synchronously blocking a single MCP
+/// tool call. Note: embedding cost scales linearly, so a full 50 MB
+/// paste will tie up the tool call for a few minutes on a typical
+/// laptop CPU; the model should warn the user before committing one.
+const ADD_TO_VAULT_MAX_BYTES: usize = 50 * 1024 * 1024;
 
 /// Cap on tag count per add_to_vault call. Beyond this, the agent is
 /// almost certainly hallucinating a taxonomy; reject so the user does
