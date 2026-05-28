@@ -317,6 +317,13 @@ enum Commands {
         #[arg(short, long, default_value_t = 7428)]
         port: u16,
 
+        /// Address to bind on for HTTP transport. Default `0.0.0.0`
+        /// makes the server reachable on the LAN (e.g. via
+        /// satchel.local on another device). Pass `127.0.0.1` to
+        /// restrict to loopback only.
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+
         /// Don't auto-open the web UI in a browser (HTTP transport only)
         #[arg(long)]
         no_browser: bool,
@@ -451,6 +458,7 @@ async fn main() -> Result<()> {
     let command = cli.command.unwrap_or(Commands::Serve {
         transport: "http".to_string(),
         port: 7428,
+        bind: "0.0.0.0".to_string(),
         no_browser: false,
     });
 
@@ -458,6 +466,7 @@ async fn main() -> Result<()> {
         Commands::Serve {
             transport,
             port,
+            bind,
             no_browser,
         } => {
             ensure_default_vault(&vault_path)?;
@@ -483,7 +492,7 @@ async fn main() -> Result<()> {
                             .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS")))
                             .unwrap_or(false);
                     let open = !no_browser && (std::io::stderr().is_terminal() || in_macos_bundle);
-                    server::serve(db, embedder, port, open, vault_path.clone()).await?
+                    server::serve(db, embedder, &bind, port, open, vault_path.clone()).await?
                 }
                 other => anyhow::bail!("Unknown transport: {other}. Use 'stdio' or 'http'."),
             }

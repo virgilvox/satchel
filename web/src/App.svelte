@@ -3,6 +3,7 @@
 
   import TopBar from './components/TopBar.svelte';
   import SideBar from './components/SideBar.svelte';
+  import WelcomeModal from './components/WelcomeModal.svelte';
 
   import Dashboard from './routes/Dashboard.svelte';
   import Ask from './routes/Ask.svelte';
@@ -17,6 +18,31 @@
   import { api } from './lib/api';
 
   let activeJobs = $state(0);
+
+  // First-launch welcome modal. Dismissal persists in localStorage so
+  // the modal does not nag on subsequent loads. Clearing the key (or
+  // wiping the browser store) brings it back next reload.
+  const WELCOME_KEY = 'satchel-welcome-dismissed';
+  let showWelcome = $state(safeReadDismissed() === false);
+
+  function safeReadDismissed(): boolean {
+    try {
+      return localStorage.getItem(WELCOME_KEY) === '1';
+    } catch {
+      // Private mode / sandboxed iframe / Safari ITP. Treat the user
+      // as dismissed-by-default rather than nagging on every reload.
+      return true;
+    }
+  }
+
+  function dismissWelcome() {
+    try {
+      localStorage.setItem(WELCOME_KEY, '1');
+    } catch {
+      /* swallow; the in-memory dismiss still takes effect this session */
+    }
+    showWelcome = false;
+  }
 
   async function poll() {
     try {
@@ -76,6 +102,10 @@
     {/if}
   </main>
 </div>
+
+{#if showWelcome}
+  <WelcomeModal onDismiss={dismissWelcome} />
+{/if}
 
 <style>
   .app {

@@ -153,6 +153,26 @@ async function loadLib() {
 }
 
 export async function checkSupport(): Promise<{ supported: boolean; reason?: string }> {
+  // WebGPU only exists on `navigator.gpu` in a secure context. The browser
+  // treats `http://localhost` and `http://127.0.0.1` as secure by spec
+  // (the "potentially trustworthy origin" allow-list), but it does NOT
+  // extend that exemption to arbitrary `.local` hostnames or LAN IPs.
+  // So opening SATCHEL via `http://satchel.local:7428` from the same
+  // machine silently disables WebGPU even though the laptop has it.
+  // Make the failure mode actionable: if we are clearly in an insecure
+  // origin, name it so the user knows to switch to localhost.
+  if (!window.isSecureContext) {
+    const here = window.location.host;
+    return {
+      supported: false,
+      reason:
+        'Insecure origin: ' +
+        here +
+        '. WebGPU is only exposed on localhost / 127.0.0.1 or HTTPS. Open SATCHEL at http://localhost:' +
+        window.location.port +
+        ' on this machine to enable the local LLM.',
+    };
+  }
   if (!('gpu' in navigator)) {
     return { supported: false, reason: 'WebGPU is not available in this browser.' };
   }
@@ -163,7 +183,7 @@ export async function checkSupport(): Promise<{ supported: boolean; reason?: str
     if (!adapter) {
       return {
         supported: false,
-        reason: 'No WebGPU adapter — try Chrome 113+ on macOS/Windows, or enable hardware acceleration.',
+        reason: 'No WebGPU adapter; try Chrome 113+ on macOS/Windows, or enable hardware acceleration.',
       };
     }
   } catch (e) {

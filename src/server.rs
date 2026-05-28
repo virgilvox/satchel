@@ -175,14 +175,23 @@ pub fn build_router(db: Database, embedder: Embedder, port: u16, vault_path: Pat
 pub async fn serve(
     db: Database,
     embedder: Embedder,
+    bind: &str,
     port: u16,
     open_in_browser: bool,
     vault_path: PathBuf,
 ) -> anyhow::Result<()> {
     let app = build_router(db, embedder, port, vault_path);
 
-    let addr = format!("127.0.0.1:{port}");
-    let url = format!("http://{addr}");
+    let addr = format!("{bind}:{port}");
+    // The address other devices and tools should USE to reach us. Even
+    // when binding 0.0.0.0 (default; needed for satchel.local from
+    // other devices), the same-machine browser should open via
+    // localhost: WebGPU is only exposed on secure contexts, and the
+    // browser's "potentially trustworthy origin" allow-list extends
+    // only to `localhost` and `127.0.0.1` (RFC 8252 / W3C Secure
+    // Contexts). Opening to `satchel.local` or the LAN IP would
+    // silently disable WebGPU and break the local-LLM Chat tab.
+    let loopback_url = format!("http://localhost:{port}");
 
     // Single-instance enforcement at the Rust level (was previously
     // `LSMultipleInstancesProhibited` in the macOS Info.plist, but that
@@ -196,24 +205,25 @@ pub async fn serve(
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             eprintln!("[satchel] Another SATCHEL is already running on {addr}.");
-            eprintln!("[satchel] Opening the existing instance's web UI: {url}");
+            eprintln!("[satchel] Opening the existing instance's web UI: {loopback_url}");
             if open_in_browser {
-                let _ = open_url(&url);
+                let _ = open_url(&loopback_url);
             }
             return Ok(());
         }
         Err(e) => return Err(e.into()),
     };
 
-    eprintln!("[satchel] Web UI:       {url}");
-    eprintln!("[satchel] MCP endpoint: {url}/mcp");
-    eprintln!("[satchel] REST API:     {url}/api/");
+    eprintln!("[satchel] Web UI:       {loopback_url}");
+    eprintln!("[satchel] MCP endpoint: {loopback_url}/mcp");
+    eprintln!("[satchel] REST API:     {loopback_url}/api/");
+    eprintln!("[satchel] Bound on:     {addr} (use --bind 127.0.0.1 to restrict to loopback)");
     // mDNS broadcasting (when enabled) is logged from `build_router`
     // alongside the satchel.local hostname so users see both lines
     // before the browser opens.
 
     if open_in_browser {
-        let url = url.clone();
+        let url = loopback_url.clone();
         tokio::spawn(async move {
             // Tiny delay so axum is actually accepting before the browser hits.
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;

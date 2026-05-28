@@ -1,5 +1,66 @@
 # Changelog
 
+## v2.8.2 (2026-05-28)
+
+### Server now binds 0.0.0.0 by default so satchel.local reaches the LAN
+
+Up through v2.8.1 the server bound `127.0.0.1`, which meant the
+`satchel.local` hostname advertised by mDNS only worked from the
+same machine (and only through routing accidents). Other devices on
+the network would see the hostname resolve to the LAN IP and then
+get connection-refused. v2.8.2 binds `0.0.0.0` by default so
+satchel.local is genuinely reachable from a phone, tablet, or other
+laptop on the same Wi-Fi.
+
+New `satchel serve --bind <addr>` flag overrides the default. Pass
+`--bind 127.0.0.1` for the prior loopback-only behavior; useful on
+public networks where you do not want to broadcast.
+
+Auto-open still uses `http://localhost:{port}` (NOT the LAN IP or
+satchel.local), because the browser only treats `localhost` and
+`127.0.0.1` as secure-context origins, and WebGPU requires a secure
+context. Opening to satchel.local on the same machine would silently
+disable the local-LLM Chat tab; opening to localhost keeps it
+working while LAN access still works for everyone else.
+
+### WebGPU detection error message names the secure-context cause
+
+`checkSupport()` now distinguishes "browser does not have WebGPU"
+from "this origin is not secure." When a user opens SATCHEL via
+satchel.local or a LAN IP, `navigator.gpu` is undefined and the new
+message reads "Insecure origin: satchel.local:7428. WebGPU is only
+exposed on localhost / 127.0.0.1 or HTTPS. Open SATCHEL at
+http://localhost:7428 on this machine to enable the local LLM." So
+the failure mode is actionable instead of mysterious.
+
+### Connect page reorganized: 3 tabs, tunnel up top
+
+Connect was getting busy. v2.8.2 splits it into three top tabs:
+
+  1. **PUBLIC TUNNEL** (default) is the Cloudflare panel for the
+     "expose this vault on the internet" workflow. Promoted to the
+     top per user request.
+  2. **LOCAL ADDRESSES** has two clean blocks: "This machine"
+     (localhost Web UI + MCP, the secure-context origin) and "Other
+     devices on this network" (satchel.local Web UI + MCP, LAN IP
+     Web UI + MCP, mDNS toggle). A secure-context warning surfaces
+     automatically when the user is browsing via a non-localhost
+     origin.
+  3. **CLIENT SETUP** has the Claude Desktop / Code / Cursor / web
+     snippets with the real binary path auto-filled.
+
+Bug fix: every COPY button now copies exactly the URL shown next to
+it. Previously some rows labeled "WEB UI" copied an MCP-suffixed
+URL, which was confusing.
+
+### Welcome modal on first launch
+
+New users see a three-step popup the first time the web UI loads:
+01 Ingest, 02 Connect, 03 Ask. Each step has a one-click action to
+jump to the relevant tab. Dismiss persists in localStorage under
+`satchel-welcome-dismissed=1`; clearing that key brings the modal
+back next reload.
+
 ## v2.8.1 (2026-05-28)
 
 ### Larger documents via add_to_vault
