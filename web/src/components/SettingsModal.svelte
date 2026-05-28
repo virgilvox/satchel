@@ -480,7 +480,7 @@
           value={chatSettings.maxRounds}
           oninput={(e) => chatSettings.setMaxRounds(Number((e.target as HTMLInputElement).value))}
         />
-        <p class="desc">Hard cap on tool-call rounds per user turn. Shared with Anthropic mode.</p>
+        <p class="desc">Hard cap on tool-call rounds per user turn (shared with Anthropic mode). With Smart mode on, the loop usually exits earlier on stall or context-pressure; this is the fallback ceiling.</p>
       </div>
 
       {@render smartMode()}
